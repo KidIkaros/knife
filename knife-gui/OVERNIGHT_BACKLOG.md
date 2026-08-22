@@ -6,7 +6,6 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Section entropy in the detail panel (spot packed/encrypted regions).
 - [ ] Hex/data inspector at a selected address.
 
 ## Done
@@ -34,6 +33,9 @@ API changes.
       — done: export_findings command writes the pane's ranked list (grade,
       pattern, api, function, address, reachability, explanation) via a save
       dialog; "export" action in the attack-surface panel head.
+- [x] Section entropy in the detail panel (spot packed/encrypted regions).
+      — done: mini entropy bar per section row, amber past 6.5 and red with a
+      "compressed, encrypted, or packed?" hint past 7.2 of 8.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

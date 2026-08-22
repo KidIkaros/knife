@@ -195,6 +195,33 @@ body {
   color: var(--accent-hi);
 }
 
+/* section-entropy bar in the detail panel */
+.ent {
+  display: inline-block;
+  width: 64px;
+  height: 6px;
+  margin-right: 8px;
+  background: #211d1e;
+  border-radius: 3px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.ent-fill {
+  display: block;
+  height: 100%;
+  background: var(--mint);
+}
+
+/* warm = high (6.5+), hot = the packed/encrypted band (7.2+) */
+.ent-fill.warm {
+  background: var(--amber);
+}
+
+.ent-fill.hot {
+  background: var(--critical);
+}
+
 .left {
   width: 340px;
   flex: 0 0 340px;

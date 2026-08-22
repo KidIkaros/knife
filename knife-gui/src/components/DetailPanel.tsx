@@ -18,6 +18,26 @@ const human = (n: number) =>
       ? (n / (1 << 10)).toFixed(1) + " KB"
       : n + " B";
 
+// Entropy reads as a bar, the way the terminal interface draws it. The bands
+// are honest about what they mean: past ~7.2 of 8 the bytes stop looking like
+// code or data and start looking like compressed, encrypted, or packed
+// content — worth a look when it is not the section you expected.
+function entropyBand(v: number) {
+  return v >= 7.2 ? "hot" : v >= 6.5 ? "warm" : "";
+}
+
+function entropyHint(v: number) {
+  return v >= 7.2 ? " — compressed, encrypted, or packed?" : v >= 6.5 ? " — high" : "";
+}
+
+function EntropyBar({ v }: { v: number }) {
+  return (
+    <span className="ent" aria-hidden>
+      <span className={"ent-fill " + entropyBand(v)} style={{ width: `${(v / 8) * 100}%` }} />
+    </span>
+  );
+}
+
 export function DetailPanel({ d }: { d: BinaryDetail }) {
   return (
     <div>
@@ -142,10 +162,15 @@ export function DetailPanel({ d }: { d: BinaryDetail }) {
         right={<span className="sr-dim">{d.sections.length}</span>}
       >
         {d.sections.map((s, i) => (
-          <div className="kv" key={i}>
+          <div
+            className="kv"
+            key={i}
+            title={`entropy ${s.entropy.toFixed(2)} / 8${entropyHint(s.entropy)}`}
+          >
             <span className="k">{s.name || "(unnamed)"}</span>
             <span className="v">
-              {s.flags} · {human(s.vsize)} · H {s.entropy.toFixed(2)}
+              <EntropyBar v={s.entropy} />
+              {s.flags} · {human(s.vsize)} · {s.entropy.toFixed(2)}
             </span>
           </div>
         ))}
