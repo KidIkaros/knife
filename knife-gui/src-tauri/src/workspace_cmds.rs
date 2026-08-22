@@ -360,6 +360,17 @@ pub fn analyst_facts(
                     addr: Some(hex(va)),
                 });
             }
+            // Address notes — including the ones autopilot writes at findings —
+            // so every comment is reviewable in one place, not only inline.
+            for (at, text) in &db.notes {
+                let va = at.wrapping_add(base);
+                rows.push(FactRow {
+                    kind: "note",
+                    name: an.label(va),
+                    detail: text.clone(),
+                    addr: Some(hex(va)),
+                });
+            }
 
             rows.retain(|r| {
                 needle.is_empty()

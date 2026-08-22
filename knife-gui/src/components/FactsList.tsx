@@ -8,6 +8,7 @@ type Item =
   | { type: "row"; row: FactRow };
 
 const GROUPS: Array<[FactRow["kind"], string]> = [
+  ["note", "NOTES"],
   ["prototype", "PROTOTYPES"],
   ["structure", "STRUCTURES"],
   ["binding", "BINDINGS"],

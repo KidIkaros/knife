@@ -200,7 +200,7 @@ export interface LineActions {
 }
 
 export interface FactRow {
-  kind: "prototype" | "structure" | "binding" | "variable";
+  kind: "prototype" | "structure" | "binding" | "variable" | "note";
   name: string;
   detail: string;
   addr: string | null;

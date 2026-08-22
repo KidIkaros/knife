@@ -12,7 +12,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ["ctrl+p", "quick-open a function, string, or address"],
       ["g", "the same quick-open"],
       ["/", "filter the function list"],
-      ["alt+←", "back to where you came from"],
+      ["alt+← / →", "back / forward through where you came from"],
       ["[ / ]", "collapse or restore the left / right pane"],
     ],
   ],
@@ -33,6 +33,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
     [
       [". / ,", "next / previous ranked finding"],
       ["m", "bookmark the selection"],
+      ["b / B", "next / previous bookmark"],
       ["y / Y", "copy address / function name"],
       ["n", "rename the function"],
       ["c", "note on the selection"],

@@ -151,6 +151,8 @@ export default function App() {
   const [xrefDir, setXrefDir] = useState<RefMode>("to");
   const [paths, setPaths] = useState<PathRow[]>([]);
   const [history, setHistory] = useState<string[]>([]);
+  // Forward stack for redo-navigation, mirroring a browser's back/forward.
+  const [forward, setForward] = useState<string[]>([]);
 
   const [cfg, setCfg] = useState<Cfg | null>(null);
   // The current function's call closure, for the calls tab; fetched only when
@@ -337,7 +339,10 @@ export default function App() {
         setIr([]);
         setIrSel(null);
         const entry = ls.length ? ls[0].addr : selector;
-        setHistory((h) => (push && current && current !== entry ? [...h, current] : h));
+        const isNewJump = push && current && current !== entry;
+        setHistory((h) => (isNewJump ? [...h, current] : h));
+        // A fresh navigation invalidates the forward stack, as in a browser.
+        if (isNewJump) setForward([]);
         setLines(ls);
         setSelected(null);
         setXrefTarget(null);
@@ -706,7 +711,7 @@ export default function App() {
         setPalette(true);
         return;
       }
-      if (e.ctrlKey && (e.key === "`" || e.key === "`")) {
+      if (e.ctrlKey && e.key === "`") {
         e.preventDefault();
         setConsole((c) => !c);
         return;
@@ -723,6 +728,11 @@ export default function App() {
       if (e.altKey && e.key === "ArrowLeft") {
         e.preventDefault();
         back();
+        return;
+      }
+      if (e.altKey && e.key === "ArrowRight") {
+        e.preventDefault();
+        forwardNav();
         return;
       }
       if (typing || !opened || prompt || menu || find !== null) return;
@@ -857,6 +867,14 @@ export default function App() {
           e.preventDefault();
           void navigator.clipboard.writeText(curName);
           setError(`copied ${curName}`);
+          break;
+        case "b":
+          e.preventDefault();
+          jumpMark(1);
+          break;
+        case "B":
+          e.preventDefault();
+          jumpMark(-1);
           break;
         case "m":
           if (opened && (selected || current)) {
@@ -1076,10 +1094,35 @@ export default function App() {
   const back = useCallback(() => {
     setHistory((h) => {
       if (!h.length) return h;
+      if (current) setForward((f) => [...f, current]);
       void openFunction(h[h.length - 1], false);
       return h.slice(0, -1);
     });
-  }, [openFunction]);
+  }, [openFunction, current]);
+
+  const forwardNav = useCallback(() => {
+    setForward((f) => {
+      if (!f.length) return f;
+      if (current) setHistory((h) => [...h, current]);
+      void openFunction(f[f.length - 1], false);
+      return f.slice(0, -1);
+    });
+  }, [openFunction, current]);
+
+  // Cycle the bookmarks in address order, like . / , cycle findings.
+  const jumpMark = useCallback(
+    (dir: 1 | -1) => {
+      if (!marks.length) return;
+      const sorted = [...marks].sort((a, b) => a.addr.localeCompare(b.addr));
+      const cur = selected ?? current;
+      const at = cur ? sorted.findIndex((m) => m.addr.toLowerCase() === cur.toLowerCase()) : -1;
+      const n = sorted.length;
+      const m = sorted[(((at + dir) % n) + n) % n];
+      void openFunction(m.addr);
+      setSelected(m.addr);
+    },
+    [marks, selected, current, openFunction],
+  );
 
   const submitRename = useCallback(async () => {
     if (!current) return;
@@ -1140,6 +1183,26 @@ export default function App() {
           <span className="topmeta">
             <b>{opened.title}</b> · {opened.format} · {opened.arch} · {opened.functions} functions ·{" "}
             {opened.high_risk} high-risk{opened.is_driver ? " · driver" : ""}
+          </span>
+        )}
+        {opened && (
+          <span className="navpair">
+            <button
+              className="navbtn"
+              disabled={!history.length}
+              title="Back (Alt+←)"
+              onClick={back}
+            >
+              ‹
+            </button>
+            <button
+              className="navbtn"
+              disabled={!forward.length}
+              title="Forward (Alt+→)"
+              onClick={forwardNav}
+            >
+              ›
+            </button>
           </span>
         )}
         <div className="spacer" />
