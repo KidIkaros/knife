@@ -2683,3 +2683,24 @@ body {
   font-weight: 400;
   font-size: 11px;
 }
+
+/* agent suggestion confidence */
+.sug-conf {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 0 5px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.sug-conf.c-high {
+  color: var(--mint);
+  border-color: var(--mint);
+}
+.sug-conf.c-medium {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.sug-conf.c-low {
+  color: var(--faint);
+}

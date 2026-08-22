@@ -292,11 +292,13 @@ export interface ChatMessage {
 }
 
 export interface Suggestion {
-  kind: "rename" | "prototype";
+  kind: "rename" | "prototype" | "note";
   selector: string;
   new_name?: string;
   returns?: string;
   params?: string[];
+  note?: string;
+  confidence: "high" | "medium" | "low";
   reason: string;
 }
 

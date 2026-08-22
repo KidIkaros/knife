@@ -250,7 +250,9 @@ export function AgentPane({
   const suggestionLabel = (s: Suggestion) =>
     s.kind === "rename"
       ? `rename ${s.selector} → ${s.new_name}`
-      : `prototype ${s.selector}: ${s.returns} (${(s.params ?? []).join(", ")})`;
+      : s.kind === "note"
+        ? `note @ ${s.selector}: ${s.note}`
+        : `prototype ${s.selector}: ${s.returns} (${(s.params ?? []).join(", ")})`;
 
   const renderSuggestions = (list: Suggestion[]) =>
     list.length > 0 && (
@@ -261,6 +263,7 @@ export function AgentPane({
           return (
             <div className="suggestion" key={j} title={s.reason}>
               <span className="sug-kind">{s.kind}</span>
+              <span className={"sug-conf c-" + s.confidence}>{s.confidence}</span>
               <span className="sug-text">{suggestionLabel(s)}</span>
               {done ? (
                 <span className="sug-done">applied</span>

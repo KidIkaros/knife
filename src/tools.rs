@@ -68,6 +68,8 @@ pub fn catalog() -> Vec<ReadTool> {
              json!({"selector": {"type": "string"}}), &["selector"]),
         tool("paths_to", "Call chains that reach a function from the entry point or an export.",
              json!({"selector": {"type": "string"}}), &["selector"]),
+        tool("trace_taint", "For one function, the exploitable-looking sinks it contains with each dangerous argument's provenance, plus the call chains that reach the function — how caller-controlled input flows to a dangerous call.",
+             json!({"selector": {"type": "string"}}), &["selector"]),
         tool("strings", "String literals whose text contains a query (empty query lists the first strings), with reference counts.",
              json!({"query": {"type": "string"}, "limit": {"type": "integer"}}), &[]),
         tool("iocs", "Indicators of compromise extracted from strings: URLs, hosts, IPs, paths, registry keys.", json!({}), &[]),
@@ -103,6 +105,7 @@ pub fn dispatch(sess: &Session, name: &str, args: &Value) -> Result<Value> {
         "xrefs" => callers(sess, &sel(args)?),
         "callees" => callees(sess, &sel(args)?),
         "paths_to" => paths_to(sess, &sel(args)?),
+        "trace_taint" => trace_taint(sess, &sel(args)?),
         "strings" => Ok(strings_tool(sess, args)),
         "iocs" => Ok(iocs(sess)),
         "imports" => Ok(imports(sess)),
@@ -346,6 +349,44 @@ fn paths_to(sess: &Session, selector: &str) -> Result<Value> {
     Ok(json!({ "to": format!("0x{target:x}"), "count": rows.len(), "paths": rows }))
 }
 
+fn trace_taint(sess: &Session, selector: &str) -> Result<Value> {
+    let an = &sess.an;
+    let f = resolve(an, selector).ok_or_else(|| anyhow!("no function '{selector}'"))?;
+    let fname = f.name.clone();
+    let faddr = f.addr;
+    // The audit already recovers each sink argument's origin with a bounded
+    // backward data-flow walk; this focuses that on one function and pairs it
+    // with how the function is reached, so the two together answer "can
+    // attacker input get here, and does it drive a dangerous call".
+    let findings = audit::run(an, &sess.bin, &sess.bytes);
+    let sinks: Vec<Value> = findings
+        .iter()
+        .filter(|fi| fi.func.as_deref() == Some(fname.as_str()))
+        .map(|fi| {
+            json!({
+                "addr": format!("0x{:x}", fi.addr),
+                "api": fi.api,
+                "pattern": fi.pattern,
+                "severity": fi.severity,
+                "reachable": fi.reachable,
+                "provenance": fi.detail,
+            })
+        })
+        .collect();
+    let chains = an.paths_to(faddr, &roots(sess), 8, false);
+    let reached: Vec<Value> = chains
+        .iter()
+        .map(|c| json!(c.iter().map(|a| an.label(*a)).collect::<Vec<_>>()))
+        .collect();
+    Ok(json!({
+        "function": fname,
+        "address": format!("0x{faddr:x}"),
+        "reachable_from": reached,
+        "sinks": sinks,
+        "note": "each sink's provenance says where its dangerous argument came from; an empty sink list means the audit found nothing exploitable-looking here.",
+    }))
+}
+
 fn strings_tool(sess: &Session, args: &Value) -> Value {
     let q = args
         .get("query")
@@ -548,7 +589,8 @@ mod tests {
         let entry = format!("0x{:x}", sess.bin.entry);
         for t in catalog() {
             let args = match t.name {
-                "disassemble" | "decompile" | "xrefs" | "callees" | "paths_to" | "call_graph" => {
+                "disassemble" | "decompile" | "xrefs" | "callees" | "paths_to" | "call_graph"
+                | "trace_taint" => {
                     json!({ "selector": entry })
                 }
                 "read_bytes" => json!({ "address": entry }),

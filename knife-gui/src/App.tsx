@@ -1063,6 +1063,8 @@ export default function App() {
         await api.setName(addr, sug.new_name);
       } else if (sug.kind === "prototype" && sug.returns) {
         await api.setPrototype(addr, sug.returns, sug.params ?? []);
+      } else if (sug.kind === "note" && sug.note) {
+        await api.setNote(addr, sug.note);
       } else {
         throw new Error("incomplete suggestion");
       }

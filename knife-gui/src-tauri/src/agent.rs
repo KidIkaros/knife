@@ -21,8 +21,6 @@
 use crate::state::AppState;
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
-use reknife::analysis::{engine, ir};
-use reknife::listing;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -47,7 +45,6 @@ const AUTOPILOT_ROUNDS: usize = 40;
 
 /// Rows returned to the model from a listing tool. Enough to reason about,
 /// bounded so a large function cannot blow the context in one call.
-const TOOL_ROW_LIMIT: usize = 400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -80,7 +77,7 @@ pub struct AgentTurn {
 /// it into an Apply button that calls the ordinary validated write command.
 #[derive(Serialize, Clone)]
 pub struct Suggestion {
-    /// "rename" or "prototype".
+    /// "rename", "prototype", or "note".
     pub kind: &'static str,
     /// Function name or hex address the edit applies to.
     pub selector: String,
@@ -90,6 +87,11 @@ pub struct Suggestion {
     pub returns: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// "high" | "medium" | "low" — how sure the model is. Autopilot applies
+    /// high-confidence edits automatically; the analyst clicks the rest.
+    pub confidence: String,
     /// Why the model proposed it, for the analyst deciding whether to apply.
     pub reason: String,
 }
@@ -140,275 +142,67 @@ fn read_key() -> Result<String> {
 /// The tool schema, in OpenAI function-calling form. Every one of these is a
 /// read: nothing here can change the database.
 fn tool_schema() -> Value {
+    // Read tools come from reknife's shared catalog, so the agent gains every
+    // analysis at once. The agent adds the propose_* tools, which record a
+    // suggestion for the analyst rather than run.
+    let mut tools: Vec<Value> = reknife::tools::catalog()
+        .into_iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.params,
+                }
+            })
+        })
+        .collect();
+
     let f = |name: &str, desc: &str, props: Value, required: Vec<&str>| {
         json!({
             "type": "function",
             "function": {
                 "name": name,
                 "description": desc,
-                "parameters": {
-                    "type": "object",
-                    "properties": props,
-                    "required": required,
-                }
+                "parameters": { "type": "object", "properties": props, "required": required },
             }
         })
     };
-    json!([
-        f(
-            "info",
-            "Format, architecture, entry point, section count, function \
-           and finding counts for the binary under analysis.",
-            json!({}),
-            vec![]
-        ),
-        f(
-            "list_functions",
-            "Recovered functions, optionally filtered by a \
-           substring of the name. Returns address, name and incoming call count.",
-            json!({"filter": {"type": "string"}, "limit": {"type": "integer"}}),
-            vec![]
-        ),
-        f(
-            "disassemble",
-            "Disassembly of one function. The selector is a \
-           function name or a hex address.",
-            json!({"selector": {"type": "string"}}),
-            vec!["selector"]
-        ),
-        f(
-            "decompile",
-            "Decompiled pseudocode for one function.",
-            json!({"selector": {"type": "string"}}),
-            vec!["selector"]
-        ),
-        f(
-            "audit",
-            "Ranked findings: dangerous call sites whose arguments look \
-           exploitable, worst first, each with the reason and whether it is \
-           reachable from an entry point.",
-            json!({"limit": {"type": "integer"}}),
-            vec![]
-        ),
-        f(
-            "xrefs",
-            "What references an address or function.",
-            json!({"selector": {"type": "string"}}),
-            vec!["selector"]
-        ),
-        f(
-            "paths_to",
-            "Call chains that reach a function from the entry point \
-           or an export. Empty means nothing was found to reach it.",
-            json!({"selector": {"type": "string"}}),
-            vec!["selector"]
-        ),
-        f(
-            "strings",
-            "String literals whose text contains a query, with how \
-           many instructions reference each.",
-            json!({"query": {"type": "string"}}),
-            vec!["query"]
-        ),
-    ])
+    let confidence = || {
+        json!({
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "how sure you are; autopilot applies high-confidence edits automatically",
+        })
+    };
+    tools.push(f(
+        "propose_rename",
+        "Recommend renaming a function. Does not modify anything; it surfaces an Apply button (and in autopilot, a high-confidence rename is applied automatically). selector is the current name or hex address.",
+        json!({"selector": {"type": "string"}, "new_name": {"type": "string"}, "confidence": confidence(), "reason": {"type": "string"}}),
+        vec!["selector", "new_name", "reason"],
+    ));
+    tools.push(f(
+        "propose_prototype",
+        "Recommend a function prototype. Read-only like propose_rename. returns is a C type; params an array of C types in order.",
+        json!({"function": {"type": "string"}, "returns": {"type": "string"}, "params": {"type": "array", "items": {"type": "string"}}, "confidence": confidence(), "reason": {"type": "string"}}),
+        vec!["function", "returns", "reason"],
+    ));
+    tools.push(f(
+        "propose_note",
+        "Recommend an analyst note at an address: a finding, a function's role, or a caveat worth recording. selector is a hex address or function name.",
+        json!({"selector": {"type": "string"}, "note": {"type": "string"}, "confidence": confidence(), "reason": {"type": "string"}}),
+        vec!["selector", "note", "reason"],
+    ));
+    json!(tools)
 }
 
-/// Run one tool against the open target. Every arm is a read.
 fn run_tool(state: &State<AppState>, name: &str, args: &Value) -> Result<String> {
-    let s = |k: &str| {
-        args.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let n = |k: &str, d: usize| {
-        args.get(k)
-            .and_then(Value::as_u64)
-            .map(|v| v as usize)
-            .unwrap_or(d)
-            .min(TOOL_ROW_LIMIT)
-    };
-
     state.read(|l| {
-        let an = &l.session.an;
-        let bin = &l.session.bin;
-        Ok(match name {
-            "info" => format!(
-                "{} {} {}-bit, entry 0x{:x}, {} sections, {} functions ({} named), {} findings",
-                bin.format.label(),
-                bin.arch.label(),
-                bin.bits,
-                bin.entry,
-                bin.sections.len(),
-                an.functions.len(),
-                an.functions.iter().filter(|f| f.named).count(),
-                l.findings.len()
-            ),
-            "list_functions" => {
-                let needle = s("filter").to_lowercase();
-                let limit = n("limit", 60);
-                let mut out = String::new();
-                for f in an
-                    .functions
-                    .iter()
-                    .filter(|f| needle.is_empty() || f.name.to_lowercase().contains(&needle))
-                    .take(limit)
-                {
-                    out.push_str(&format!(
-                        "0x{:x} {} ({} refs, {} bytes)\n",
-                        f.addr, f.name, f.incoming, f.size
-                    ));
-                }
-                if out.is_empty() {
-                    "no match".into()
-                } else {
-                    out
-                }
-            }
-            "disassemble" | "decompile" => {
-                let sel = s("selector");
-                let f = crate::commands::resolve(an, &sel)
-                    .ok_or_else(|| anyhow!("nothing matches {sel}"))?;
-                if name == "decompile" {
-                    ir::decompile(an, bin, f, &l.strings, &l.session.db)
-                        .iter()
-                        .map(|x| x.text.clone())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    listing::function(an, f, &l.session.db, l.base, &l.strings, l.hints.as_ref())
-                        .iter()
-                        .take(TOOL_ROW_LIMIT)
-                        .map(|line| match line {
-                            listing::Line::Label { text, .. } => text.clone(),
-                            listing::Line::Insn {
-                                addr,
-                                mnemonic,
-                                operands,
-                                annot,
-                                ..
-                            } => format!(
-                                "0x{addr:x}  {mnemonic} {operands}{}",
-                                annot
-                                    .as_ref()
-                                    .map(|a| format!(
-                                        "   ; {}",
-                                        match a {
-                                            listing::Annot::Note(t)
-                                            | listing::Annot::Symbol(t)
-                                            | listing::Annot::Local(t)
-                                            | listing::Annot::Text(t)
-                                            | listing::Annot::Hint(t) => t.clone(),
-                                        }
-                                    ))
-                                    .unwrap_or_default()
-                            ),
-                            listing::Line::Data { addr, text } => format!("0x{addr:x}  {text}"),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            }
-            "audit" => {
-                let limit = n("limit", 40);
-                let mut out = String::new();
-                for f in l.findings.iter().take(limit) {
-                    out.push_str(&format!(
-                        "[{}] {} {} at 0x{:x} in {} {} — {}\n",
-                        f.severity,
-                        f.pattern,
-                        f.api,
-                        f.addr,
-                        f.func.as_deref().unwrap_or("?"),
-                        if f.reachable {
-                            "(reachable)"
-                        } else {
-                            "(unproven)"
-                        },
-                        f.detail
-                    ));
-                }
-                if out.is_empty() {
-                    "no findings".into()
-                } else {
-                    out
-                }
-            }
-            "xrefs" => {
-                let sel = s("selector");
-                let target = crate::commands::resolve(an, &sel)
-                    .map(|f| f.addr)
-                    .or_else(|| crate::commands::parse_addr(&sel).ok())
-                    .ok_or_else(|| anyhow!("nothing matches {sel}"))?;
-                match an.xrefs_to.get(&target) {
-                    Some(refs) => refs
-                        .iter()
-                        .take(TOOL_ROW_LIMIT)
-                        .map(|x| {
-                            format!(
-                                "0x{:x} {} in {}",
-                                x.from,
-                                x.kind.label(),
-                                crate::commands::site_name(an, x.from)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    None => "no references".into(),
-                }
-            }
-            "paths_to" => {
-                let sel = s("selector");
-                let target = crate::commands::resolve(an, &sel)
-                    .map(|f| f.addr)
-                    .or_else(|| crate::commands::parse_addr(&sel).ok())
-                    .ok_or_else(|| anyhow!("nothing matches {sel}"))?;
-                let base = engine::display_base(bin);
-                let mut roots: Vec<u64> = bin
-                    .symbols
-                    .iter()
-                    .filter(|y| y.kind == reknife::model::SymKind::Export)
-                    .map(|y| y.addr + base)
-                    .collect();
-                roots.push(bin.entry + base);
-                let chains = an.paths_to(target, &roots, 8, false);
-                if chains.is_empty() {
-                    "nothing reaches it from an entry point or export".into()
-                } else {
-                    chains
-                        .iter()
-                        .map(|c| {
-                            c.iter()
-                                .map(|a| an.label(*a))
-                                .collect::<Vec<_>>()
-                                .join(" -> ")
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            }
-            "strings" => {
-                let q = s("query").to_lowercase();
-                let mut out = String::new();
-                let mut shown = 0;
-                for (addr, st) in l.strings.iter() {
-                    if !st.text.to_lowercase().contains(&q) {
-                        continue;
-                    }
-                    let refs = an.xrefs_to.get(addr).map_or(0, Vec::len);
-                    out.push_str(&format!("0x{addr:x} ({refs} refs) {:?}\n", st.text));
-                    shown += 1;
-                    if shown >= 80 {
-                        break;
-                    }
-                }
-                if out.is_empty() {
-                    "no literal matches".into()
-                } else {
-                    out
-                }
-            }
-            other => return Err(anyhow!("unknown tool {other}")),
+        let v = reknife::tools::dispatch(&l.session, name, args)?;
+        Ok(match v {
+            Value::String(text) => text,
+            other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
         })
     })
 }
@@ -695,28 +489,46 @@ async fn agent_turn(
 
             // The propose_* tools do not read or write; they record a suggestion
             // the analyst can apply with a click, preserving the read-only rule.
-            if t.name == "propose_rename" || t.name == "propose_prototype" {
+            if t.name == "propose_rename"
+                || t.name == "propose_prototype"
+                || t.name == "propose_note"
+            {
                 let get = |k: &str| {
                     args.get(k)
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string()
                 };
-                let sel = get("selector");
-                let func = get("function");
-                let suggestion = if t.name == "propose_rename" {
-                    Suggestion {
+                let confidence = match args.get("confidence").and_then(Value::as_str) {
+                    Some("high") => "high",
+                    Some("low") => "low",
+                    _ => "medium",
+                }
+                .to_string();
+                let suggestion = match t.name.as_str() {
+                    "propose_rename" => Suggestion {
                         kind: "rename",
-                        selector: sel,
+                        selector: get("selector"),
                         new_name: Some(get("new_name")),
                         returns: None,
                         params: None,
+                        note: None,
+                        confidence,
                         reason: get("reason"),
-                    }
-                } else {
-                    Suggestion {
+                    },
+                    "propose_note" => Suggestion {
+                        kind: "note",
+                        selector: get("selector"),
+                        new_name: None,
+                        returns: None,
+                        params: None,
+                        note: Some(get("note")),
+                        confidence,
+                        reason: get("reason"),
+                    },
+                    _ => Suggestion {
                         kind: "prototype",
-                        selector: func,
+                        selector: get("function"),
                         new_name: None,
                         returns: Some(get("returns")),
                         params: Some(
@@ -729,8 +541,10 @@ async fn agent_turn(
                                 })
                                 .unwrap_or_default(),
                         ),
+                        note: None,
+                        confidence,
                         reason: get("reason"),
-                    }
+                    },
                 };
                 emit(
                     &app,
