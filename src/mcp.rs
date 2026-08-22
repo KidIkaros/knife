@@ -6,9 +6,8 @@
 //! The stdio transport is newline-delimited JSON: one message per line, nothing
 //! else on stdout (logs go to stderr), so the stream stays clean.
 
-use crate::analysis::{audit, engine, ir};
-use crate::listing::{self, Annot, Line};
-use crate::{workspace::Session, ANALYSIS_BUDGET};
+use crate::analysis::engine;
+use crate::{tools, workspace::Session, ANALYSIS_BUDGET};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -118,66 +117,57 @@ fn file_arg() -> Value {
 }
 
 fn tool_list() -> Vec<Value> {
-    let file_only = json!({
-        "type": "object",
-        "properties": { "file": file_arg() },
-        "required": ["file"],
-    });
-    let file_func = json!({
-        "type": "object",
-        "properties": {
+    // Read tools come from the shared catalog; MCP only adds its transport
+    // `file` argument to each. Write tools are MCP-specific and listed after.
+    let mut all: Vec<Value> = tools::catalog()
+        .into_iter()
+        .map(|t| {
+            let mut schema = t.params;
+            if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                props.insert("file".into(), file_arg());
+            }
+            if let Some(req) = schema.get_mut("required").and_then(Value::as_array_mut) {
+                req.insert(0, json!("file"));
+            }
+            tool(t.name, t.description, schema)
+        })
+        .collect();
+
+    let addr = || json!({ "type": "string", "description": "address (0x...)" });
+    all.push(tool(
+        "set_name",
+        "Persist an analyst name for the code at an address. Mutates the saved database.",
+        json!({ "type": "object", "properties": {
+            "file": file_arg(), "address": addr(), "name": { "type": "string" } },
+            "required": ["file", "address", "name"] }),
+    ));
+    all.push(tool(
+        "set_note",
+        "Attach an analyst note to an address. Mutates the saved database.",
+        json!({ "type": "object", "properties": {
+            "file": file_arg(), "address": addr(), "note": { "type": "string" } },
+            "required": ["file", "address", "note"] }),
+    ));
+    all.push(tool(
+        "set_prototype",
+        "Set a function prototype: a return C type and ordered parameter C types. Mutates the saved database.",
+        json!({ "type": "object", "properties": {
             "file": file_arg(),
-            "function": { "type": "string", "description": "function name or address (0x...)" },
-        },
-        "required": ["file", "function"],
-    });
-    vec![
-        tool(
-            "list_functions",
-            "List the recovered functions (address, name, block count, incoming references).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "file": file_arg(),
-                    "limit": { "type": "number", "description": "max functions (default 200)" },
-                    "named_only": { "type": "boolean", "description": "only named functions" },
-                },
-                "required": ["file"],
-            }),
-        ),
-        tool(
-            "disassemble",
-            "Disassemble one function, with resolved call names and string annotations.",
-            file_func.clone(),
-        ),
-        tool(
-            "decompile",
-            "Decompile one function to structured pseudocode (if/else/while/switch, named locals, inlined strings).",
-            file_func,
-        ),
-        tool(
-            "audit",
-            "Rank the sink call sites by how exploitable their arguments look (argument-provenance bug finder).",
-            file_only.clone(),
-        ),
-        tool(
-            "xrefs",
-            "List the cross-references to an address.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "file": file_arg(),
-                    "address": { "type": "string", "description": "target address (0x...)" },
-                },
-                "required": ["file", "address"],
-            }),
-        ),
-        tool(
-            "info",
-            "Summarise the file: format, architecture, sections, imports, function count.",
-            file_only,
-        ),
-    ]
+            "function": { "type": "string", "description": "name or address (0x...)" },
+            "returns": { "type": "string" },
+            "params": { "type": "array", "items": { "type": "string" } } },
+            "required": ["file", "function", "returns"] }),
+    ));
+    all.push(tool(
+        "stage_patch",
+        "Stage a byte patch at a file offset (replacement bytes as hex). Staged only; exporting writes it out.",
+        json!({ "type": "object", "properties": {
+            "file": file_arg(),
+            "offset": { "type": "string", "description": "file offset (0x...)" },
+            "bytes": { "type": "string", "description": "replacement bytes as hex, e.g. 90 90" } },
+            "required": ["file", "offset", "bytes"] }),
+    ));
+    all
 }
 
 fn tool(name: &str, description: &str, schema: Value) -> Value {
@@ -189,7 +179,8 @@ fn call_tool(msg: &Value, cache: &mut Option<(String, Session)>) -> Result<Strin
     let name = params
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing tool name"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing tool name"))?
+        .to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let file = args
         .get("file")
@@ -197,19 +188,86 @@ fn call_tool(msg: &Value, cache: &mut Option<(String, Session)>) -> Result<Strin
         .ok_or_else(|| anyhow::anyhow!("missing `file`"))?
         .to_string();
 
-    let sess = session(cache, &file)?;
-    match name {
-        "list_functions" => Ok(list_functions(sess, &args)),
-        "disassemble" => with_func(sess, &args, disassemble),
-        "decompile" => with_func(sess, &args, decompile),
-        "audit" => Ok(run_audit(sess)),
-        "xrefs" => xrefs(sess, &args),
-        "info" => Ok(info(sess)),
+    // Read tools dispatch through the shared catalog. A string result (a
+    // disassembly, pseudocode, a hex dump) is returned verbatim; anything else
+    // is JSON.
+    if tools::catalog().iter().any(|t| t.name == name) {
+        let sess = session(cache, &file)?;
+        let v = tools::dispatch(sess, &name, &args)?;
+        return Ok(match v {
+            Value::String(text) => text,
+            other => other.to_string(),
+        });
+    }
+
+    // Write tools mutate the saved database, exactly as the CLI edit commands do;
+    // the Session layer re-applies them on the next open.
+    match name.as_str() {
+        "set_name" | "set_note" => {
+            let va = addr_arg(&args, "address")?;
+            let key = if name == "set_name" { "name" } else { "note" };
+            let text = args
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing `{key}`"))?
+                .to_string();
+            let sess = session_mut(cache, &file)?;
+            let at = va.wrapping_sub(engine::display_base(&sess.bin));
+            if name == "set_name" {
+                sess.db.set_name(at, &text);
+            } else {
+                sess.db.set_note(at, &text);
+            }
+            sess.db.save()?;
+            Ok(json!({ "ok": true, "address": format!("0x{va:x}"), key: text }).to_string())
+        }
+        "set_prototype" => {
+            let selector = args
+                .get("function")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing `function`"))?
+                .to_string();
+            let returns = args
+                .get("returns")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing `returns`"))?
+                .to_string();
+            let ps: Vec<String> = args
+                .get("params")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let sess = session_mut(cache, &file)?;
+            let func = resolve(&sess.an, &selector)
+                .ok_or_else(|| anyhow::anyhow!("no function '{selector}'"))?;
+            let at = func.addr.wrapping_sub(sess.an.display_base);
+            let fname = func.name.clone();
+            sess.db.set_prototype(at, &returns, &ps)?;
+            sess.db.save()?;
+            Ok(json!({ "ok": true, "function": fname,
+                       "prototype": format!("{returns} ({})", ps.join(", ")) })
+            .to_string())
+        }
+        "stage_patch" => {
+            let offset = addr_arg(&args, "offset")?;
+            let hex = args
+                .get("bytes")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("missing `bytes`"))?;
+            let raw = parse_hex_bytes(hex)?;
+            let sess = session_mut(cache, &file)?;
+            let n = sess.db.stage_patch(&sess.bytes, offset, &raw)?;
+            sess.db.save()?;
+            Ok(json!({ "ok": true, "offset": format!("0x{offset:x}"), "staged": n }).to_string())
+        }
         other => anyhow::bail!("unknown tool '{other}'"),
     }
 }
 
-/// Load and analyse `file`, reusing the cached session when it is the same file.
 fn session<'a>(cache: &'a mut Option<(String, Session)>, file: &str) -> Result<&'a Session> {
     let stale = cache.as_ref().map(|(p, _)| p != file).unwrap_or(true);
     if stale {
@@ -229,155 +287,38 @@ fn resolve<'a>(an: &'a engine::Analysis, sel: &str) -> Option<&'a engine::Functi
         .and_then(|a| an.find_function(a).or_else(|| an.function_at(a)))
 }
 
-fn with_func(
-    sess: &Session,
-    args: &Value,
-    f: impl Fn(&Session, &engine::Function) -> String,
-) -> Result<String> {
-    let sel = args
-        .get("function")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing `function`"))?;
-    let func = resolve(&sess.an, sel)
-        .ok_or_else(|| anyhow::anyhow!("no function '{sel}' (try list_functions)"))?;
-    Ok(f(sess, func))
-}
-
-fn list_functions(sess: &Session, args: &Value) -> String {
-    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize;
-    let named_only = args
-        .get("named_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let rows: Vec<Value> = sess
-        .an
-        .functions
-        .iter()
-        .filter(|f| !named_only || f.named)
-        .take(limit)
-        .map(|f| {
-            json!({
-                "addr": format!("0x{:x}", f.addr),
-                "name": f.name,
-                "named": f.named,
-                "blocks": f.blocks.len(),
-                "incoming": f.incoming,
-                "size": f.size,
-            })
-        })
-        .collect();
-    json!({ "count": sess.an.functions.len(), "functions": rows }).to_string()
-}
-
-fn decompile(sess: &Session, f: &engine::Function) -> String {
-    let base = engine::display_base(&sess.bin);
-    let strings = listing::string_map(&sess.bin, &sess.bytes, base);
-    ir::decompile(&sess.an, &sess.bin, f, &strings, &sess.db)
-        .into_iter()
-        .map(|l| l.text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn disassemble(sess: &Session, f: &engine::Function) -> String {
-    let base = engine::display_base(&sess.bin);
-    let strings = listing::string_map(&sess.bin, &sess.bytes, base);
-    let hints = if crate::analysis::driver::plausibly_a_driver(&sess.bin) {
-        crate::analysis::driver::listing_hints(&sess.bin, &sess.bytes, &sess.an)
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    listing::function(&sess.an, f, &sess.db, base, &strings, Some(&hints))
-        .iter()
-        .map(|l| render_line(l, base))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_line(l: &Line, base: u64) -> String {
-    match l {
-        Line::Label { text, .. } => format!("{text}:"),
-        Line::Data { addr, text } => format!("{:012x}  {text}", addr + base),
-        Line::Insn {
-            addr,
-            mnemonic,
-            operands,
-            annot,
-            ..
-        } => {
-            let mut s = format!("{:012x}  {mnemonic:<7} {operands}", addr + base);
-            if let Some(a) = annot {
-                let t = match a {
-                    Annot::Note(t) | Annot::Symbol(t) | Annot::Local(t) | Annot::Hint(t) => {
-                        t.clone()
-                    }
-                    Annot::Text(t) => format!("\"{t}\""),
-                };
-                s.push_str(&format!("  ; {t}"));
-            }
-            s
-        }
+fn session_mut<'a>(
+    cache: &'a mut Option<(String, Session)>,
+    file: &str,
+) -> Result<&'a mut Session> {
+    let stale = cache.as_ref().map(|(p, _)| p != file).unwrap_or(true);
+    if stale {
+        let sess = Session::open(file, None, ANALYSIS_BUDGET, "the MCP server")?;
+        *cache = Some((file.to_string(), sess));
     }
+    Ok(&mut cache.as_mut().expect("just set").1)
 }
 
-fn run_audit(sess: &Session) -> String {
-    let mut findings = audit::run(&sess.an, &sess.bin, &sess.bytes);
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.addr.cmp(&b.addr)));
-    let rows: Vec<Value> = findings
-        .iter()
-        .map(|f| {
-            json!({
-                "addr": format!("0x{:x}", f.addr),
-                "function": f.func,
-                "api": f.api,
-                "pattern": f.pattern,
-                "severity": f.severity,
-                "reachable": f.reachable,
-                "detail": f.detail,
-            })
-        })
-        .collect();
-    json!({ "count": rows.len(), "findings": rows }).to_string()
-}
-
-fn xrefs(sess: &Session, args: &Value) -> Result<String> {
-    let sel = args
-        .get("address")
+fn addr_arg(args: &Value, key: &str) -> Result<u64> {
+    let s = args
+        .get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing `address`"))?;
-    let hex = sel.trim().trim_start_matches("0x").trim_start_matches("0X");
-    let at = u64::from_str_radix(hex, 16).map_err(|_| anyhow::anyhow!("bad address '{sel}'"))?;
-    let rows: Vec<Value> = sess
-        .an
-        .xrefs_to
-        .get(&at)
-        .map(|v| {
-            v.iter()
-                .map(|x| {
-                    let site = sess
-                        .an
-                        .function_at(x.from)
-                        .map(|f| f.name.clone())
-                        .unwrap_or_else(|| "-".into());
-                    json!({ "from": format!("0x{:x}", x.from), "kind": x.kind.label(), "in": site })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(json!({ "to": format!("0x{at:x}"), "count": rows.len(), "xrefs": rows }).to_string())
+        .ok_or_else(|| anyhow::anyhow!("missing `{key}`"))?;
+    let h = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    u64::from_str_radix(h, 16).map_err(|_| anyhow::anyhow!("bad address '{s}'"))
 }
 
-fn info(sess: &Session) -> String {
-    let named = sess.an.functions.iter().filter(|f| f.named).count();
-    json!({
-        "format": sess.bin.format.label(),
-        "arch": sess.bin.arch.label(),
-        "sections": sess.bin.sections.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        "imports": sess.an.imports.len(),
-        "functions": sess.an.functions.len(),
-        "named_functions": named,
-    })
-    .to_string()
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.is_empty() || !cleaned.len().is_multiple_of(2) {
+        anyhow::bail!("hex bytes must be a non-empty even-length hex string");
+    }
+    (0..cleaned.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&cleaned[i..i + 2], 16).map_err(|_| anyhow::anyhow!("bad hex byte"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
