@@ -6,8 +6,6 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Deeper IOCTL decode in the driver view: break CTL_CODE into device / function /
-      method / access, shown per handler.
 - [ ] Whole-program call graph: expose graphs::call_graph and add a navigable view.
 - [ ] Bookmarks: mark/unmark an address (IDA marks), persisted per binary, list panel.
 - [ ] Findings report export: write the ranked findings to a markdown file.
@@ -23,6 +21,10 @@ API changes.
 - [x] Copy actions: copy current address / function name to clipboard (keyboard + menu).
       — done: y copies selected/current address, Y copies function name; both also in
       the pseudocode context menu, with a copied toast.
+- [x] Deeper IOCTL decode in the driver view: break CTL_CODE into device / function /
+      method / access, shown per handler.
+      — done: all four fields were already in the DTO; the row now shows
+      dev/fn/method/access and tooltips the CTL_CODE() form.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

@@ -87,10 +87,15 @@ export function DriverView({
 
       <div className="sym-module">IOCTLS ({report.ioctls.length})</div>
       {report.ioctls.map((c, i) => (
-        <div key={i} className="drow" onClick={() => onJump(c.addr)}>
+        <div
+          key={i}
+          className="drow"
+          onClick={() => onJump(c.addr)}
+          title={`CTL_CODE(${c.device_type}, ${c.function}, ${c.method}, ${c.access})`}
+        >
           <span className="dname">{c.code}</span>
           <span className="ddetail">
-            {c.method} fn {c.function}
+            dev {c.device_type} · fn {c.function} · {c.method} · access {c.access}
           </span>
         </div>
       ))}
