@@ -12,6 +12,7 @@ pub mod model;
 pub mod output;
 #[cfg(test)]
 mod robustness;
+pub mod tools;
 pub mod tui;
 pub mod workspace;
 

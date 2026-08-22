@@ -165,6 +165,16 @@ export default function App() {
   const [inspectAt, setInspectAt] = useState<string | null>(null);
   // The keyboard map overlay.
   const [help, setHelp] = useState(false);
+  // Recently opened targets, newest first, for the welcome screen.
+  const [recents, setRecents] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem("knife.recents");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((p) => typeof p === "string") : [];
+    } catch {
+      return [];
+    }
+  });
   // Attack-surface severity filter: null shows everything.
   const [sevFilter, setSevFilter] = useState<3 | 2 | 1 | null>(null);
   // A pinned xref target (e.g. a string literal), overriding the open function
@@ -416,6 +426,16 @@ export default function App() {
         const fns = await loadViews();
         api.listTargets().then(setTargets).catch(() => {});
         remember(path, null);
+        // Remember the visit for the welcome screen, newest first.
+        setRecents((all) => {
+          const next = [path, ...all.filter((p) => p !== path)].slice(0, 8);
+          try {
+            localStorage.setItem("knife.recents", JSON.stringify(next));
+          } catch {
+            /* persistence is a convenience */
+          }
+          return next;
+        });
         if (fns.length) void openFunction(fns[0].addr, false);
       } catch (e) {
         setError(String(e));
@@ -1265,6 +1285,20 @@ export default function App() {
                   Open a PE / ELF / Mach-O
                 </button>
               </div>
+              {recents.length > 0 && (
+                <div className="recents">
+                  {recents.map((p) => (
+                    <div
+                      key={p}
+                      className="recent"
+                      title={p}
+                      onClick={() => void doOpen(p)}
+                    >
+                      {p.split(/[\\/]/).pop()}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         ) : (
