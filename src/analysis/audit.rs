@@ -293,20 +293,22 @@ fn classify(
         Check::AllocSize(arg) => {
             let p = provenance(an, bin, bytes, func, block, call_idx, arg, win64);
             if p.contains(Origin::Multiply) {
+                let (sev, src) = arith_severity(&p);
                 Some(sized(
                     &mk,
                     "alloc-overflow",
-                    3,
-                    "allocation size computed by multiplication (integer overflow?)",
+                    sev,
+                    &format!("allocation size computed by multiplication {src}"),
                     p.bounded,
                     p.mixed(),
                 ))
             } else if p.contains(Origin::Subtract) {
+                let (sev, src) = arith_severity(&p);
                 Some(sized(
                     &mk,
                     "alloc-underflow",
-                    2,
-                    "allocation size computed by subtraction",
+                    sev,
+                    &format!("allocation size computed by subtraction {src}"),
                     p.bounded,
                     p.mixed(),
                 ))
@@ -324,22 +326,22 @@ fn classify(
                 ""
             };
             if p.contains(Origin::Subtract) {
+                let (sev, src) = arith_severity(&p);
                 Some(sized(
                     &mk,
                     "copy-underflow",
-                    3,
-                    &format!(
-                        "copy length computed by subtraction (integer underflow to a huge size?){dst}"
-                    ),
+                    sev,
+                    &format!("copy length computed by subtraction {src}{dst}"),
                     p.bounded,
                     p.mixed(),
                 ))
             } else if p.contains(Origin::Multiply) {
+                let (sev, src) = arith_severity(&p);
                 Some(sized(
                     &mk,
                     "copy-overflow",
-                    2,
-                    &format!("copy length computed by multiplication (integer overflow?){dst}"),
+                    sev,
+                    &format!("copy length computed by multiplication {src}{dst}"),
                     p.bounded,
                     p.mixed(),
                 ))
@@ -352,6 +354,20 @@ fn classify(
 
 /// Build a size-argument finding, downgrading it a band and annotating it when
 /// the value was clamped or masked before the call.
+/// Rank an arithmetic-size finding by whether the values feeding the arithmetic
+/// are attacker-influenced. A product or difference of caller-controlled input
+/// is the real integer bug; one of constants or internal values is the benign
+/// allocator pattern that used to be a false positive, and drops to the bottom.
+fn arith_severity(p: &Prov) -> (u8, &'static str) {
+    if p.contains(Origin::External) || p.contains(Origin::Argument) {
+        (3, "from caller-controlled input")
+    } else if p.contains(Origin::Dynamic) {
+        (2, "from a runtime value")
+    } else {
+        (1, "from constant or internal values, likely safe")
+    }
+}
+
 fn sized(
     mk: &dyn Fn(&'static str, u8, String) -> Finding,
     pattern: &'static str,
@@ -606,7 +622,37 @@ fn resolve_reg(
             want = d.op1_register().full_register();
             continue;
         }
-        return Prov::one(origin_of(&d, bin, an, bytes), bounded);
+        let origin = origin_of(&d, bin, an, bytes);
+        // See through size arithmetic into its operands: a product or difference
+        // is only dangerous if a value feeding it is attacker-influenced. A
+        // `count * size` of constants is the benign allocator pattern, and
+        // stopping at the multiply cannot tell the two apart. Chase the read GPR
+        // operands (bounded by `depth`) and union what they resolve to. Chasing
+        // a memory-address base errs toward "attacker-influenced", i.e. toward
+        // keeping a real bug high.
+        if matches!(origin, Origin::Multiply | Origin::Subtract) && depth < 2 {
+            let reads: Vec<Register> = info
+                .info(&d)
+                .used_registers()
+                .iter()
+                .filter(|u| matches!(u.access(), OpAccess::Read | OpAccess::ReadWrite))
+                .map(|u| u.register())
+                .filter(|r| r.is_gpr())
+                .map(|r| r.full_register())
+                .collect();
+            let mut origins = BTreeSet::from([origin]);
+            let mut b = bounded;
+            for r in reads {
+                let sub = resolve_reg(an, bin, bytes, func, block, j, r, depth + 1, win64);
+                origins.extend(sub.origins);
+                b |= sub.bounded;
+            }
+            return Prov {
+                origins,
+                bounded: b,
+            };
+        }
+        return Prov::one(origin, bounded);
     }
 
     // Not written in this block. Join every predecessor's possible origins.
@@ -1113,6 +1159,31 @@ mod tests {
             "expected alloc-overflow, got {:?}",
             f.iter().map(|x| x.pattern).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn malloc_size_from_a_constant_multiply_is_not_high() {
+        // mov eax, 0x10 ; mov ecx, 0x20 ; imul eax, ecx ; mov edi, eax ; call malloc
+        // The size is a product of two constants — the benign `count * size`
+        // allocator pattern, not a caller-controlled overflow. Seeing through the
+        // imul to its constant operands must drop it to the bottom band; that is
+        // the false positive real software surfaces.
+        let code = vec![
+            0xb8, 0x10, 0x00, 0x00, 0x00, // mov eax, 0x10
+            0xb9, 0x20, 0x00, 0x00, 0x00, // mov ecx, 0x20
+            0x0f, 0xaf, 0xc1, // imul eax, ecx
+            0x89, 0xc7, // mov edi, eax
+        ];
+        let f = Harness::new("malloc", code).findings();
+        let hit = f
+            .iter()
+            .find(|x| x.pattern == "alloc-overflow")
+            .expect("still surfaced, just low");
+        assert_eq!(
+            hit.severity, 1,
+            "a constant-operand product is not exploitable"
+        );
+        assert!(hit.detail.contains("constant or internal"));
     }
 
     #[test]

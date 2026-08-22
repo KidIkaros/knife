@@ -142,24 +142,34 @@ export function GraphView({
     fit();
   }, [fit]);
 
+  // Wheel-zoom via a native, non-passive listener. React registers onWheel as
+  // passive, so its preventDefault is ignored and the wheel scrolls the pane
+  // instead of zooming; attaching directly lets preventDefault take. Re-attaches
+  // when the graph mounts (model goes from null to set).
+  useEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const box = el.getBoundingClientRect();
+      const mx = e.clientX - box.left;
+      const my = e.clientY - box.top;
+      setView((v) => {
+        const k = Math.min(3, Math.max(0.08, v.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+        // Keep the point under the cursor fixed while zooming.
+        return { k, x: mx - ((mx - v.x) * k) / v.k, y: my - ((my - v.y) * k) / v.k };
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [model]);
+
   if (!cfg || !model) {
     return <div className="graph-empty">no function open</div>;
   }
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const box = wrap.current!.getBoundingClientRect();
-    const mx = e.clientX - box.left;
-    const my = e.clientY - box.top;
-    setView((v) => {
-      const k = Math.min(3, Math.max(0.08, v.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
-      // Keep the point under the cursor fixed while zooming.
-      return { k, x: mx - ((mx - v.x) * k) / v.k, y: my - ((my - v.y) * k) / v.k };
-    });
-  };
-
   return (
-    <div className="graph-wrap" ref={wrap} onWheel={onWheel}>
+    <div className="graph-wrap" ref={wrap}>
       <div className="graph-tools">
         <button onClick={() => setView((v) => ({ ...v, k: Math.min(3, v.k * 1.2) }))} title="Zoom in">
           +
