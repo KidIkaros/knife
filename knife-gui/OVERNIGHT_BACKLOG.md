@@ -57,7 +57,9 @@ API changes.
 - [x] Alt-click a chip in the findings strip to open its evidence.
       — done: alt-click picks the finding and opens the attack-surface pane
       (showFinding); plain click still selects the site; tooltip says so.
-- [ ] Recent targets on the welcome screen (list_targets).
+- [x] Recent targets on the welcome screen (list_targets).
+      — done: last 8 opened paths in localStorage, listed under the open
+      button on the welcome screen, click to reopen.
 - [x] METHOD_NEITHER IOCTLs flagged in the driver view (raw user buffer —
       classic LPE pattern).
       — done: the code renders in critical red with a "raw buffer" tag and a
