@@ -7,18 +7,26 @@ export function XrefPane({
   paths,
   dir,
   onDir,
+  about,
   onJump,
 }: {
   rows: XrefRow[];
   paths: PathRow[];
   dir: RefMode;
   onDir: (d: RefMode) => void;
+  /** A pinned subject (a string literal, say), when it is not the open function. */
+  about?: string | null;
   onJump: (addr: string) => void;
 }) {
   return (
     <div className="xref">
       <div className="panel-head">
         <span>{dir === "paths" ? "reachability" : "xrefs"}</span>
+        {about && (
+          <span className="count" title="showing references to this address">
+            @ {about.replace("0x", "")}
+          </span>
+        )}
         <span className="count">({dir === "paths" ? paths.length : rows.length})</span>
         <div className="spacer" />
         <div className="seg">

@@ -164,6 +164,9 @@ export default function App() {
   const [inspectAt, setInspectAt] = useState<string | null>(null);
   // Attack-surface severity filter: null shows everything.
   const [sevFilter, setSevFilter] = useState<3 | 2 | 1 | null>(null);
+  // A pinned xref target (e.g. a string literal), overriding the open function
+  // until the next navigation.
+  const [xrefTarget, setXrefTarget] = useState<string | null>(null);
   const [patches, setPatches] = useState<PatchRun[]>([]);
   const [driver, setDriver] = useState<DriverReport | null>(null);
   // The unfiltered report, fetched at open on a driver, for the inline primitive markers.
@@ -296,6 +299,7 @@ export default function App() {
         setHistory((h) => (push && current && current !== entry ? [...h, current] : h));
         setLines(ls);
         setSelected(null);
+        setXrefTarget(null);
         setNoting(false);
         setRenaming(false);
         setCurrent(entry);
@@ -575,25 +579,27 @@ export default function App() {
   }, [tab, current, ir.length, pseudoLoading]);
 
   // Load cross-references for the open function whenever it or the direction
-  // changes.
+  // changes. A pinned target (a string literal under inspection) overrides
+  // until the next navigation.
   useEffect(() => {
-    if (!current) {
+    const sel = xrefTarget ?? current;
+    if (!sel) {
       setXrefs([]);
       setPaths([]);
       return;
     }
     if (xrefDir === "paths") {
       api
-        .pathsTo(current, 12)
+        .pathsTo(sel, 12)
         .then(setPaths)
         .catch(() => setPaths([]));
     } else {
       api
-        .xrefs(current, xrefDir)
+        .xrefs(sel, xrefDir)
         .then(setXrefs)
         .catch(() => setXrefs([]));
     }
-  }, [current, xrefDir]);
+  }, [current, xrefDir, xrefTarget]);
 
   // The call closure costs one rooted walk over every function; fetch it only
   // when the calls tab is actually shown.
@@ -1361,7 +1367,19 @@ export default function App() {
                       }}
                     />
                   </div>
-                  <StringsList rows={strings} onJump={(a) => openFunction(a)} />
+                  <StringsList
+                    rows={strings}
+                    onJump={(a) => openFunction(a)}
+                    onRefs={(s) => {
+                      // A referenced literal is a door: open the function that
+                      // holds it and pin the xref pane to the string itself.
+                      void (async () => {
+                        await openFunction(s.addr);
+                        setXrefDir("to");
+                        setXrefTarget(s.addr);
+                      })();
+                    }}
+                  />
                 </>
               ) : (
                 <>
@@ -1599,13 +1617,14 @@ export default function App() {
                 />
               )}
 
-              <XrefPane
-                rows={xrefs}
-                paths={paths}
-                dir={xrefDir}
-                onDir={setXrefDir}
-                onJump={(a) => openFunction(a)}
-              />
+                <XrefPane
+                  rows={xrefs}
+                  paths={paths}
+                  dir={xrefDir}
+                  onDir={setXrefDir}
+                  about={xrefTarget}
+                  onJump={(a) => openFunction(a)}
+                />
             </div>
 
             {rightOpen && (

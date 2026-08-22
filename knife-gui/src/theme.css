@@ -398,6 +398,17 @@ body {
   font-size: 11px;
 }
 
+/* a reference count that lists its sites when clicked */
+.fn-row .refs.ref-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.fn-row .refs.ref-link:hover {
+  color: var(--accent-hi);
+}
+
 /* code view */
 .tabs {
   height: 32px;

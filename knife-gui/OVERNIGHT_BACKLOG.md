@@ -54,7 +54,10 @@ API changes.
 - [x] Driver view: primitives deep-link to pseudocode, not just the listing.
       — done: a "p" chip on each primitive row opens the first call site's
       function and lands on its pseudocode tab (decompile stays lazy).
-- [ ] Strings list: reference counts and jump-to-xref.
+- [x] Strings list: reference counts and jump-to-xref.
+      — done: clicking a string's ref count opens its function and pins the
+      xref pane to the literal (@ addr shown in the pane head); any navigation
+      unpins. Row click still jumps as before.
 - [ ] Remember the last-used graph/calls tab per session restore.
 
 ## Notes
