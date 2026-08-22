@@ -10,6 +10,8 @@ const PAD_Y = 8;
 const GAP_X = 44;
 const GAP_Y = 56;
 const MAX_LINES = 10;
+// Wrap a layer wider than this many cards into a grid (call closures fan wide).
+const MAX_ROW = 6;
 
 interface Placed {
   node: CfgNode;
@@ -90,15 +92,28 @@ function layout(cfg: Cfg) {
   let width = 0;
   for (const d of [...layers.keys()].sort((a, b) => a - b)) {
     const row = layers.get(d)!;
-    const rowW = row.length * CARD_W + (row.length - 1) * GAP_X;
-    width = Math.max(width, rowW);
-    let rowH = 0;
+    // A control-flow layer is a handful of blocks and lays out as one row. A
+    // call closure, though, can drop dozens of functions into a single layer,
+    // which as one row becomes an unreadable horizontal smear. Wrap a wide
+    // layer into a near-square grid instead; narrow layers are unchanged, so
+    // ordinary CFGs look exactly as before.
+    const cols = row.length > MAX_ROW ? Math.ceil(Math.sqrt(row.length)) : row.length;
+    const gridW = cols * CARD_W + (cols - 1) * GAP_X;
+    width = Math.max(width, gridW);
+    const cellH = Math.max(...row.map(cardHeight));
     row.forEach((n, i) => {
-      const h = cardHeight(n);
-      rowH = Math.max(rowH, h);
-      placed.set(n.id, { node: n, x: i * (CARD_W + GAP_X) - rowW / 2, y, w: CARD_W, h });
+      const col = i % cols;
+      const sub = Math.floor(i / cols);
+      placed.set(n.id, {
+        node: n,
+        x: col * (CARD_W + GAP_X) - gridW / 2,
+        y: y + sub * (cellH + GAP_Y),
+        w: CARD_W,
+        h: cardHeight(n),
+      });
     });
-    y += rowH + GAP_Y;
+    const subRows = Math.ceil(row.length / cols);
+    y += subRows * (cellH + GAP_Y) + GAP_Y;
   }
   return { placed, width: width + 80, height: y };
 }
