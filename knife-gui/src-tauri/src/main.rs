@@ -66,6 +66,7 @@ fn main() {
             symbols::exports,
             commands::attack_surface,
             commands::export_findings,
+            commands::hex_dump,
             commands::binary_detail,
             commands::set_name,
             commands::set_note,

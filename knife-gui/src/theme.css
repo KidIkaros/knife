@@ -222,6 +222,63 @@ body {
   background: var(--critical);
 }
 
+/* ── hex inspector ────────────────────────────────────────────────────── */
+.hexcard {
+  position: fixed;
+  right: 16px;
+  bottom: 36px;
+  z-index: 40;
+  min-width: 460px;
+  max-width: 640px;
+  padding: 8px 10px;
+  background: #161415;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+}
+
+.hexhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--mint);
+}
+
+.hexnav {
+  display: flex;
+  gap: 10px;
+  cursor: pointer;
+  color: var(--faint);
+}
+
+.hnav:hover,
+.fclose:hover {
+  color: var(--accent-hi);
+}
+
+.hexrow {
+  display: flex;
+  gap: 10px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.hexlabel {
+  color: var(--faint);
+}
+
+.hexascii {
+  color: var(--muted);
+}
+
+.hexnote {
+  color: var(--faint);
+  padding: 4px 0 2px;
+}
+
 .left {
   width: 340px;
   flex: 0 0 340px;

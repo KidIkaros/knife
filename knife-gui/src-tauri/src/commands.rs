@@ -14,6 +14,7 @@ use reknife::analysis::{graphs, ir};
 use reknife::db;
 use reknife::listing;
 use reknife::model::SymKind;
+use serde::Serialize;
 use tauri::{Emitter, State};
 
 /// Resolve a selector — a symbol name, or a hex address — to a function.
@@ -221,8 +222,59 @@ pub fn attack_surface(state: State<AppState>) -> Result<Vec<FindingDto>, String>
         .map_err(|e| e.to_string())
 }
 
-/// Write the ranked findings to a markdown report.
+/// One 16-byte row of a hex dump: address label, hex pairs, ascii gutter.
+#[derive(Serialize)]
+pub struct HexRow {
+    pub label: String,
+    pub hex: String,
+    pub ascii: String,
+}
+
+/// The bytes at an address.
 ///
+/// The inspector's whole backend: map the vaddr through the sections, read
+/// from the in-memory image, format rows. Static bytes only — the file on
+/// disk, never a run of the target.
+#[tauri::command]
+pub fn hex_dump(
+    state: State<AppState>,
+    addr: String,
+    len: Option<usize>,
+) -> Result<Vec<HexRow>, String> {
+    state
+        .read(|l| {
+            let at = parse_addr(&addr)?;
+            let off = reknife::analysis::disasm::vaddr_to_off(&l.session.bin, at)
+                .ok_or_else(|| anyhow!("{addr} is not in any section"))?;
+            let want = len.unwrap_or(128).clamp(16, 1024);
+            let start = (off as usize).min(l.session.bytes.len());
+            let end = (start + want).min(l.session.bytes.len());
+            let data = &l.session.bytes[start..end];
+            let mut rows = Vec::new();
+            for (i, chunk) in data.chunks(16).enumerate() {
+                let hexs: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+                let ascii: String = chunk
+                    .iter()
+                    .map(|&b| {
+                        if (0x20..=0x7e).contains(&b) {
+                            b as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                rows.push(HexRow {
+                    label: hex(at + (i * 16) as u64),
+                    hex: hexs.join(" "),
+                    ascii,
+                });
+            }
+            Ok(rows)
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Write the ranked findings to a markdown report.///
 /// The same ranked list the attack-surface pane shows, in the order it shows
 /// them (severity, then reachability), with each finding's own explanation —
 /// what IDA/Ghidra never write down. Returns how many findings were written.

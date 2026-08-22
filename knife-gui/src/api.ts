@@ -318,6 +318,8 @@ export const api = {
   pathsTo: (selector: string, max?: number) => invoke<PathRow[]>("paths_to", { selector, max }),
   attackSurface: () => invoke<Finding[]>("attack_surface"),
   exportFindings: (dest: string) => invoke<number>("export_findings", { dest }),
+  hexDump: (addr: string, len?: number) =>
+    invoke<Array<{ label: string; hex: string; ascii: string }>>("hex_dump", { addr, len }),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
   bookmarksList: (path: string) => invoke<BookmarkRow[]>("bookmarks_list", { path }),

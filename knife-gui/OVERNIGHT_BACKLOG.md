@@ -6,7 +6,7 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Hex/data inspector at a selected address.
+(none — append new items below)
 
 ## Done
 - [x] Finding navigation indicator: show "⚑ i/N" in the status bar while cycling
@@ -36,6 +36,12 @@ API changes.
 - [x] Section entropy in the detail panel (spot packed/encrypted regions).
       — done: mini entropy bar per section row, amber past 6.5 and red with a
       "compressed, encrypted, or packed?" hint past 7.2 of 8.
+- [x] Hex/data inspector at a selected address.
+      — done: h toggles a floating card at the selected/current address;
+      new hex_dump command maps the vaddr through sections and formats
+      16-byte rows with an ascii gutter; ‹ › page by 64 bytes, Esc closes.
+
+## New items
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

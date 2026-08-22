@@ -33,6 +33,7 @@ import { StringsList } from "./components/StringsList";
 import { Palette } from "./components/Palette";
 import { LineMenu, pseudoMenu, type MenuItem } from "./components/LineMenu";
 import { FactsList } from "./components/FactsList";
+import { HexInspector } from "./components/HexInspector";
 import { PatchList } from "./components/PatchList";
 import { DriverView } from "./components/DriverView";
 import { Evidence } from "./components/Evidence";
@@ -159,6 +160,8 @@ export default function App() {
   const [facts, setFacts] = useState<FactRow[]>([]);
   // Bookmarks for the open binary; reloaded whenever the target changes.
   const [marks, setMarks] = useState<BookmarkRow[]>([]);
+  // The hex inspector's address, or null while it is closed.
+  const [inspectAt, setInspectAt] = useState<string | null>(null);
   const [patches, setPatches] = useState<PatchRun[]>([]);
   const [driver, setDriver] = useState<DriverReport | null>(null);
   // The unfiltered report, fetched at open on a driver, for the inline primitive markers.
@@ -637,6 +640,7 @@ export default function App() {
         setPalette(false);
         setRenaming(false);
         setNoting(false);
+        setInspectAt(null);
         return;
       }
       if (e.altKey && e.key === "ArrowLeft") {
@@ -789,6 +793,11 @@ export default function App() {
               })
               .catch((err) => setError(String(err)));
           }
+          break;
+        case "h":
+          // The data inspector: what the selected instruction touches.
+          e.preventDefault();
+          setInspectAt((v) => (v !== null ? null : selected ?? current));
           break;
       }
     };
@@ -1641,6 +1650,10 @@ export default function App() {
         <Console onClose={() => setConsole(false)} onJump={(a) => openFunction(a)} />
       )}
 
+      {opened && inspectAt && (
+        <HexInspector addr={inspectAt} onSeek={setInspectAt} onClose={() => setInspectAt(null)} />
+      )}
+
       {opened && (
         <div className="statusbar">
           <span className="sb-fn">{curName || "—"}</span>
@@ -1666,7 +1679,7 @@ export default function App() {
           })()}
           <div className="spacer" />
           <span className="sb-keys">
-            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
+            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   h data   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
           </span>
         </div>
       )}
