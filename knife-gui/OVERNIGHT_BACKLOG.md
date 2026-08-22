@@ -56,7 +56,9 @@ API changes.
 - [x] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
       — done: "dot" button in the graph toolbar on both graph tabs; save dialog,
       96-node cap on closures, toast reports nodes/edges.
-- [ ] Keyboard help overlay (? key) listing every binding.
+- [x] Keyboard help overlay (? key) listing every binding.
+      — done: ? toggles a four-group card (navigate / views / analyze /
+      pseudocode); Esc or ✕ closes; statusbar gained the "? keys" hint.
 - [x] Reachability proof inline: show the actual call chain from an entry point
       or export to a picked finding in the evidence pane (paths_to already
       accepts the sink address).
@@ -65,7 +67,6 @@ API changes.
 - [x] Severity filter chips (H/M/L) on the attack-surface list.
       — done: toggleable H/M/L chips in the panel head; display-only, cycling
       and the statusbar position still walk the full ranked list.
-- [ ] Severity filter chips (H/M/L) on the attack-surface list.
 - [x] Driver view: primitives deep-link to pseudocode, not just the listing.
       — done: a "p" chip on each primitive row opens the first call site's
       function and lands on its pseudocode tab (decompile stays lazy).

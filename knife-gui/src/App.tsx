@@ -34,6 +34,7 @@ import { Palette } from "./components/Palette";
 import { LineMenu, pseudoMenu, type MenuItem } from "./components/LineMenu";
 import { FactsList } from "./components/FactsList";
 import { HexInspector } from "./components/HexInspector";
+import { KeyMap } from "./components/KeyMap";
 import { PatchList } from "./components/PatchList";
 import { DriverView } from "./components/DriverView";
 import { Evidence } from "./components/Evidence";
@@ -162,6 +163,8 @@ export default function App() {
   const [marks, setMarks] = useState<BookmarkRow[]>([]);
   // The hex inspector's address, or null while it is closed.
   const [inspectAt, setInspectAt] = useState<string | null>(null);
+  // The keyboard map overlay.
+  const [help, setHelp] = useState(false);
   // Attack-surface severity filter: null shows everything.
   const [sevFilter, setSevFilter] = useState<3 | 2 | 1 | null>(null);
   // A pinned xref target (e.g. a string literal), overriding the open function
@@ -694,6 +697,7 @@ export default function App() {
         setRenaming(false);
         setNoting(false);
         setInspectAt(null);
+        setHelp(false);
         return;
       }
       if (e.altKey && e.key === "ArrowLeft") {
@@ -851,6 +855,10 @@ export default function App() {
           // The data inspector: what the selected instruction touches.
           e.preventDefault();
           setInspectAt((v) => (v !== null ? null : selected ?? current));
+          break;
+        case "?":
+          e.preventDefault();
+          setHelp((v) => !v);
           break;
       }
     };
@@ -1800,7 +1808,7 @@ export default function App() {
           })()}
           <div className="spacer" />
           <span className="sb-keys">
-            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   h data   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
+            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   h data   ? keys   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
           </span>
         </div>
       )}
@@ -1869,6 +1877,8 @@ export default function App() {
           onClose={() => setPalette(false)}
         />
       )}
+
+      {help && <KeyMap onClose={() => setHelp(false)} />}
     </div>
   );
 }
