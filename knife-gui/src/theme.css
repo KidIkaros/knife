@@ -299,6 +299,26 @@ body {
   color: var(--faint);
 }
 
+/* one little-endian qword group */
+.hexq,
+.hexptr {
+  display: inline-block;
+  margin-right: 8px;
+}
+
+/* a qword that reads as a pointer: click to seek there */
+.hexptr {
+  color: var(--mint);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--faint);
+}
+
+.hexptr:hover {
+  color: var(--accent-hi);
+}
+
 .hexascii {
   color: var(--muted);
 }

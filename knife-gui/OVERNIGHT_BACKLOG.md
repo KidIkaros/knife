@@ -6,10 +6,12 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Hex inspector: seek to an embedded pointer (click a plausible qword).
 - [ ] FunctionList: severity dot legend on hover.
 
 ## Done
+- [x] Hex inspector: seek to an embedded pointer (click a plausible qword).
+      — done: rows render as eight LE qwords; any ≥ 0x10000 underlines mint and
+      seeks on click (a wrong guess just reports "not in any section").
 - [x] Per-handler IOCTLs in the driver view: under each dispatch handler, list
       the IOCTL codes decoded inside it (containment via the function list).
       — done: chips under each IRP row, click opens the comparison site;
