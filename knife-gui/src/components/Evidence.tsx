@@ -1,4 +1,5 @@
-import type { Finding } from "../api";
+import { useEffect, useState } from "react";
+import { api, type Finding, type PathRow } from "../api";
 
 /**
  * Why a finding is a finding.
@@ -7,7 +8,8 @@ import type { Finding } from "../api";
  * an audit is the argument behind each one: where the value came from, how it
  * reached the call, and whether anything outside the binary can drive it. That
  * reasoning is the product, so it gets shown rather than summarised into a
- * severity colour.
+ * severity colour — including the call chain itself, so "REACHABLE" is a proof
+ * you can read, not a badge you must believe.
  */
 export function Evidence({
   finding,
@@ -18,6 +20,22 @@ export function Evidence({
   onJump: (addr: string) => void;
   onPaths: () => void;
 }) {
+  const [paths, setPaths] = useState<PathRow[] | null>(null);
+
+  // The walk is per finding; refetch when the picked sink changes.
+  useEffect(() => {
+    if (!finding) return;
+    let live = true;
+    setPaths(null);
+    api
+      .pathsTo(finding.addr, 3)
+      .then((p) => live && setPaths(p))
+      .catch(() => live && setPaths([]));
+    return () => {
+      live = false;
+    };
+  }, [finding?.addr]);
+
   if (!finding) return null;
 
   const level = finding.severity >= 3 ? "HIGH" : finding.severity >= 2 ? "MEDIUM" : "LOW";
@@ -70,6 +88,26 @@ export function Evidence({
       <div className="erow why">
         <span className="ekey">why</span>
         <span className="ewhy">{finding.detail}</span>
+      </div>
+
+      <div className="erow why">
+        <span className="ekey">proof</span>
+        <span className="eproof">
+          {paths === null
+            ? "walking…"
+            : paths.length === 0
+              ? "no path from an entry point or export"
+              : paths.slice(0, 3).map((p) => (
+                  <div className="epath" key={p.hops[0]?.addr} onClick={() => p.hops[0] && onJump(p.hops[0].addr)}>
+                    {p.hops.map((h, i) => (
+                      <span key={i}>
+                        {i > 0 && <i>{" → "}</i>}
+                        <b title={h.addr}>{h.name || h.addr}</b>
+                      </span>
+                    ))}
+                  </div>
+                ))}
+        </span>
       </div>
     </div>
   );

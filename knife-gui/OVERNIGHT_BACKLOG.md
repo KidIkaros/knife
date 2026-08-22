@@ -42,6 +42,15 @@ API changes.
       16-byte rows with an ascii gutter; ‹ › page by 64 bytes, Esc closes.
 
 ## New items
+- [x] Reachability proof inline: show the actual call chain from an entry point
+      or export to a picked finding in the evidence pane (paths_to already
+      accepts the sink address).
+      — done: a "proof" row walks up to 3 chains from entry/exports to the sink
+      on pick; hops are clickable, absence says so plainly.
+- [ ] Severity filter chips (H/M/L) on the attack-surface list.
+- [ ] Driver view: primitives deep-link to pseudocode, not just the listing.
+- [ ] Strings list: reference counts and jump-to-xref.
+- [ ] Remember the last-used graph/calls tab per session restore.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

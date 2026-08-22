@@ -1693,6 +1693,33 @@ body {
   border-left-color: var(--muted);
 }
 
+/* the reachability proof: entry → … → sink, one chain per line */
+.eproof {
+  color: var(--faint);
+}
+
+.epath {
+  margin-top: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.epath b {
+  color: var(--mint);
+  font-weight: 600;
+}
+
+.epath i {
+  color: var(--faint);
+  font-style: normal;
+}
+
+.epath:hover b {
+  color: var(--accent-hi);
+}
+
 .ehead {
   display: flex;
   align-items: baseline;
