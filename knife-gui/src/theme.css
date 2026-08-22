@@ -2626,3 +2626,39 @@ body {
 .kprim-flag:hover {
   background: #2a1e20;
 }
+
+/* ── autopilot ────────────────────────────────────────────────────────── */
+.autopilot-btn {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.autopilot-btn:hover {
+  background: #2a1e20;
+}
+
+.autopilot-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  width: 100%;
+  background: linear-gradient(180deg, #241417, #1a0f11);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+.autopilot-cta:hover {
+  background: linear-gradient(180deg, #2e181c, #201013);
+}
+.autopilot-cta .sub {
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 11px;
+}

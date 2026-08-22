@@ -58,6 +58,7 @@ fn main() {
             agent::agent_has_key,
             agent::agent_ask,
             agent::agent_cancel,
+            agent::agent_autopilot,
             commands::cfg,
             commands::call_graph,
             commands::export_dot,

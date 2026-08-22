@@ -176,6 +176,37 @@ export function AgentPane({
     }
   };
 
+  const autopilot = async () => {
+    if (liveRef.current) return;
+    setError(null);
+    setLive({
+      question: "🛰 Autopilot — investigating this binary",
+      reply: "",
+      steps: [],
+      suggestions: [],
+      status: "surveying",
+    });
+    liveRef.current = true;
+    try {
+      const t = await api.agentAutopilot(model);
+      setTurns((all) => [
+        ...all,
+        {
+          question: "🛰 Autopilot investigation",
+          reply: t.reply,
+          steps: t.steps,
+          suggestions: t.suggestions,
+        },
+      ]);
+      setHistory(t.history);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      liveRef.current = false;
+      setLive(null);
+    }
+  };
+
   const newChat = () => {
     setTurns([]);
     setHistory([]);
@@ -284,6 +315,11 @@ export function AgentPane({
             </button>
           ))}
         </span>
+        {!live && (
+          <button className="act autopilot-btn" onClick={autopilot} title="Investigate autonomously">
+            ▶ autopilot
+          </button>
+        )}
         {(turns.length > 0 || history.length > 0) && !live && (
           <button className="act" onClick={newChat}>
             new chat
@@ -335,6 +371,12 @@ export function AgentPane({
                     </span>
                   ))}
                 </div>
+                <button className="autopilot-cta" onClick={autopilot}>
+                  ▶ Auto-pilot this binary
+                  <span className="sub">
+                    survey → prioritise → deep-dive → ranked criticals report
+                  </span>
+                </button>
               </div>
             )}
 

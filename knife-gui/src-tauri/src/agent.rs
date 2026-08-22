@@ -42,6 +42,8 @@ static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// one, follow a call, check what reaches it — so this is not a tight budget.
 /// What matters more is what happens at the end of it: see `force_answer`.
 const MAX_TOOL_ROUNDS: usize = 16;
+/// Autopilot drives a whole investigation, so it gets a deeper tool budget.
+const AUTOPILOT_ROUNDS: usize = 40;
 
 /// Rows returned to the model from a listing tool. Enough to reason about,
 /// bounded so a large function cannot blow the context in one call.
@@ -411,7 +413,7 @@ fn run_tool(state: &State<AppState>, name: &str, args: &Value) -> Result<String>
     })
 }
 
-fn system_prompt(target: &str, is_driver: bool) -> String {
+fn system_prompt(target: &str, is_driver: bool, autopilot: bool) -> String {
     let mut p = format!(
         "You are assisting a reverse engineer working on {target} inside knife, a static \
          binary analysis tool. Use the tools to read the binary rather than guessing; if you \
@@ -422,6 +424,11 @@ fn system_prompt(target: &str, is_driver: bool) -> String {
          as you can support an answer, and never repeat a tool call you have already made with \
          the same arguments, since it returns the same bytes."
     );
+    if autopilot {
+        p.push_str(
+            " AUTOPILOT MODE. Work autonomously and do not ask the analyst questions; run the              whole investigation yourself and finish with one report. Method: (1) Survey — call              info, audit, and strings, and note the entry point, exports, and the imported APIs              that matter (memory, process/token, crypto, network, registry, device I/O).              (2) Prioritise — build a short target list from the audit findings, the dangerous              imports, the entry and exports, and, for a driver, the IOCTL dispatch; highest              severity and most reachable first. (3) Investigate each target — decompile it, read              the sinks in context, and use xrefs and paths_to to show how caller-controlled input              reaches it and whether it is reachable from an entry point, export, or IOCTL;              separate a concrete exploitable site from a generic pattern the audit merely              pattern-matched. (4) As you work out a function's role, call propose_rename with a              precise name so the analyst is left with a labelled binary. Keep going until you have              covered the high-value targets, then STOP calling tools and write the report.              Finish with markdown sections: '## Verdict' (one line: is anything critical, and the              overall risk), '## Criticals' (each: title, address, why it matters, what the              attacker controls, the reachability chain, and exploitability — concrete,              needs-conditions, or theoretical), '## Interesting' (lower-severity but notable              behaviour, with addresses), and '## Map' (the functions you named and their roles).              Be honest about coverage: state what you did not reach. Never invent behaviour you              did not read.",
+        );
+    }
     if is_driver {
         p.push_str(
             " This target is a Windows kernel driver and the analyst is hunting local \
@@ -572,7 +579,22 @@ pub async fn agent_ask(
     question: String,
     history: Vec<ChatMessage>,
 ) -> Result<AgentTurn, String> {
-    agent_turn(app, state, model, question, history)
+    agent_turn(app, state, model, question, history, MAX_TOOL_ROUNDS, false)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Autopilot: the agent investigates the whole binary on its own and returns a
+/// ranked report plus proposed renames. A fresh run (no history), deeper budget.
+#[tauri::command]
+pub async fn agent_autopilot(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<AgentTurn, String> {
+    let seed = "Auto-pilot this binary: investigate it end to end on your own and                 report the interesting findings and criticals."
+        .to_string();
+    agent_turn(app, state, model, seed, Vec::new(), AUTOPILOT_ROUNDS, true)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -583,6 +605,8 @@ async fn agent_turn(
     model: String,
     question: String,
     history: Vec<ChatMessage>,
+    rounds: usize,
+    autopilot: bool,
 ) -> Result<AgentTurn> {
     let key = read_key()?;
     let (target, is_driver) = state
@@ -598,7 +622,7 @@ async fn agent_turn(
     if history.is_empty() {
         messages.push(ChatMessage {
             role: "system".into(),
-            content: Some(system_prompt(&target, is_driver)),
+            content: Some(system_prompt(&target, is_driver, autopilot)),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -620,7 +644,7 @@ async fn agent_turn(
     let mut suggestions: Vec<Suggestion> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    for _ in 0..MAX_TOOL_ROUNDS {
+    for _ in 0..rounds {
         emit(&app, json!({ "kind": "round" }));
         let body = json!({
             "model": model,

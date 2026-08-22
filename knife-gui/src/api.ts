@@ -366,6 +366,7 @@ export const api = {
   agentAsk: (model: string, question: string, history: ChatMessage[]) =>
     invoke<AgentTurn>("agent_ask", { model, question, history }),
   agentCancel: () => invoke<void>("agent_cancel"),
+  agentAutopilot: (model: string) => invoke<AgentTurn>("agent_autopilot", { model }),
   setYaraRules: (path?: string) => invoke<number>("set_yara_rules", { path }),
   yaraMatches: () => invoke<[string | null, YaraHit[]]>("yara_matches"),
   driverReport: (minSeverity?: number, reachableOnly?: boolean) =>
