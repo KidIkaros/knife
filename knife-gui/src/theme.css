@@ -2634,6 +2634,13 @@ body {
   background: var(--faint);
 }
 
+/* the dot legend in the functions panel head; the meaning rides on hover */
+.risk-legend {
+  display: inline-flex;
+  gap: 3px;
+  cursor: help;
+}
+
 /* a dangerous call site, marked in the disassembly */
 .code .ln.danger {
   box-shadow: inset 2px 0 0 var(--faint);

@@ -6,9 +6,12 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] FunctionList: severity dot legend on hover.
+(none — append new items below)
 
 ## Done
+- [x] FunctionList: severity dot legend on hover.
+      — done: a three-dot legend in the functions panel head; hovering explains
+      red / amber / hollow.
 - [x] Hex inspector: seek to an embedded pointer (click a plausible qword).
       — done: rows render as eight LE qwords; any ≥ 0x10000 underlines mint and
       seeks on click (a wrong guess just reports "not in any section").

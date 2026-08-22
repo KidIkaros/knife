@@ -1456,6 +1456,14 @@ export default function App() {
                 <>
                   <div className="panel-head">
                     <span>functions</span>
+                    <span
+                      className="risk-legend"
+                      title="row dots — red: contains a high-severity finding · amber: contains a finding · hollow: clean"
+                    >
+                      <i className="risk-dot s3" />
+                      <i className="risk-dot s2" />
+                      <i className="risk-dot none" />
+                    </span>
                     <span className="count">({functions.length})</span>
                   </div>
                   <div className="filter">
