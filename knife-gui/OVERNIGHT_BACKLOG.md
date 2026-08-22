@@ -6,7 +6,6 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Findings report export: write the ranked findings to a markdown file.
 - [ ] Section entropy in the detail panel (spot packed/encrypted regions).
 - [ ] Hex/data inspector at a selected address.
 
@@ -31,6 +30,10 @@ API changes.
       — done: m toggles a mark at the selected/current address; JSON sidecar in
       app-data keyed by target path (window furniture, kept out of reknife's db);
       listed in the facts panel, click jumps, ✕ removes.
+- [x] Findings report export: write the ranked findings to a markdown file.
+      — done: export_findings command writes the pane's ranked list (grade,
+      pattern, api, function, address, reachability, explanation) via a save
+      dialog; "export" action in the attack-surface panel head.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

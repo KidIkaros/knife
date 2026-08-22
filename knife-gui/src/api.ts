@@ -317,6 +317,7 @@ export const api = {
     invoke<XrefRow[]>("xrefs", { addr, direction }),
   pathsTo: (selector: string, max?: number) => invoke<PathRow[]>("paths_to", { selector, max }),
   attackSurface: () => invoke<Finding[]>("attack_surface"),
+  exportFindings: (dest: string) => invoke<number>("export_findings", { dest }),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
   bookmarksList: (path: string) => invoke<BookmarkRow[]>("bookmarks_list", { path }),

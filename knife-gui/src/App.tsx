@@ -1351,6 +1351,25 @@ export default function App() {
                 <>
                   <div className="panel-head">
                     <span>attack surface</span>
+                    <span
+                      className="panel-action"
+                      title="write the ranked findings to a markdown report"
+                      onClick={async () => {
+                        const dest = await saveDialog({
+                          defaultPath: "findings.md",
+                          filters: [{ name: "Markdown", extensions: ["md"] }],
+                        });
+                        if (!dest) return;
+                        try {
+                          const n = await api.exportFindings(dest);
+                          setError(`wrote ${n} finding${n === 1 ? "" : "s"} to ${dest}`);
+                        } catch (err) {
+                          setError(String(err));
+                        }
+                      }}
+                    >
+                      export
+                    </span>
                     <span className="count">({findings.length})</span>
                   </div>
                   <AttackSurface

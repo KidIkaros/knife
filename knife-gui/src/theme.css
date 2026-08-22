@@ -183,6 +183,18 @@ body {
   color: var(--faint);
 }
 
+/* an inline action in a panel head, e.g. the findings report export */
+.panel-head .panel-action {
+  color: var(--faint);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.panel-head .panel-action:hover {
+  color: var(--accent-hi);
+}
+
 .left {
   width: 340px;
   flex: 0 0 340px;

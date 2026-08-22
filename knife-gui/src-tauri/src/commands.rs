@@ -221,6 +221,61 @@ pub fn attack_surface(state: State<AppState>) -> Result<Vec<FindingDto>, String>
         .map_err(|e| e.to_string())
 }
 
+/// Write the ranked findings to a markdown report.
+///
+/// The same ranked list the attack-surface pane shows, in the order it shows
+/// them (severity, then reachability), with each finding's own explanation —
+/// what IDA/Ghidra never write down. Returns how many findings were written.
+#[tauri::command]
+pub fn export_findings(state: State<AppState>, dest: String) -> Result<usize, String> {
+    state
+        .read(|l| {
+            let name = l
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| l.path.to_string_lossy().into_owned());
+            let mut out = String::new();
+            out.push_str(&format!("# knife findings — {name}\n\n"));
+            if l.findings.is_empty() {
+                out.push_str("No findings.\n");
+            } else {
+                out.push_str(&format!(
+                    "{} finding{}, ranked by severity then reachability.\n\n",
+                    l.findings.len(),
+                    if l.findings.len() == 1 { "" } else { "s" }
+                ));
+            }
+            for f in &l.findings {
+                let grade = match f.severity {
+                    3.. => "HIGH",
+                    2 => "MED",
+                    _ => "LOW",
+                };
+                let f = FindingDto::from(f);
+                out.push_str(&format!(
+                    "## [{}] {} — {} @ {}\n\n",
+                    grade,
+                    f.pattern,
+                    f.api,
+                    f.func.as_deref().unwrap_or("unknown function"),
+                ));
+                out.push_str(&format!("- address: `{}`\n", f.addr));
+                out.push_str(&format!(
+                    "- reachable from user input: {}\n",
+                    if f.reachable { "yes" } else { "no" }
+                ));
+                if !f.source.is_empty() && f.source != "ARGUMENT" {
+                    out.push_str(&format!("- argument source: {}\n", f.source));
+                }
+                out.push_str(&format!("\n{}\n\n", f.detail));
+            }
+            std::fs::write(&dest, out).map_err(|e| anyhow!(e))?;
+            Ok(l.findings.len())
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn binary_detail(state: State<AppState>) -> Result<serde_json::Value, String> {
     state
