@@ -1620,8 +1620,13 @@ export default function App() {
                     <span
                       key={f.addr + f.pattern}
                       className={"fchip sev s" + Math.min(f.severity, 3) + (selected === f.addr ? " on" : "")}
-                      title={`${f.pattern.replace(/-/g, " ")} — ${f.detail}`}
-                      onClick={() => {
+                      title={`${f.pattern.replace(/-/g, " ")} — ${f.detail}\nalt-click: open its evidence`}
+                      onClick={(e) => {
+                        // Alt is "why": jump straight to the evidence pane.
+                        if (e.altKey) {
+                          showFinding(f);
+                          return;
+                        }
                         if (tab === "graph" || tab === "calls") setTab("disasm");
                         setSelected(f.addr);
                       }}

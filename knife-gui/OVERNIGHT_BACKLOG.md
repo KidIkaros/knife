@@ -54,7 +54,9 @@ API changes.
 - [x] Evidence pane: copy the proof chain as text for report writing.
       — done: a "copy" link beside the proof rows writes the chains
       (A → B → sink, one per line) to the clipboard; flips to "copied".
-- [ ] Alt-click a chip in the findings strip to open its evidence.
+- [x] Alt-click a chip in the findings strip to open its evidence.
+      — done: alt-click picks the finding and opens the attack-surface pane
+      (showFinding); plain click still selects the site; tooltip says so.
 - [ ] Recent targets on the welcome screen (list_targets).
 - [x] METHOD_NEITHER IOCTLs flagged in the driver view (raw user buffer —
       classic LPE pattern).
