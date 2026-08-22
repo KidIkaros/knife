@@ -6,7 +6,6 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Bookmarks: mark/unmark an address (IDA marks), persisted per binary, list panel.
 - [ ] Findings report export: write the ranked findings to a markdown file.
 - [ ] Section entropy in the detail panel (spot packed/encrypted regions).
 - [ ] Hex/data inspector at a selected address.
@@ -28,6 +27,10 @@ API changes.
       — done as a rooted closure: new call_graph command (graphs::call_graph with
       roots={current fn}, refused past 96 nodes) + a calls tab reusing the graph
       view; cards open the function on double-click.
+- [x] Bookmarks: mark/unmark an address (IDA marks), persisted per binary, list panel.
+      — done: m toggles a mark at the selected/current address; JSON sidecar in
+      app-data keyed by target path (window furniture, kept out of reknife's db);
+      listed in the facts panel, click jumps, ✕ removes.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

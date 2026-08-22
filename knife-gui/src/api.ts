@@ -206,6 +206,11 @@ export interface FactRow {
   addr: string | null;
 }
 
+export interface BookmarkRow {
+  addr: string;
+  label: string;
+}
+
 export interface PatchRun {
   offset: string;
   vaddr: string | null;
@@ -314,6 +319,9 @@ export const api = {
   attackSurface: () => invoke<Finding[]>("attack_surface"),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
+  bookmarksList: (path: string) => invoke<BookmarkRow[]>("bookmarks_list", { path }),
+  bookmarkToggle: (path: string, addr: string, label?: string) =>
+    invoke<boolean>("bookmark_toggle", { path, addr, label }),
   callGraph: (selector: string, maxNodes?: number) =>
     invoke<Cfg>("call_graph", { selector, maxNodes }),
   strings: (filter?: string, referencedOnly?: boolean, limit?: number) =>

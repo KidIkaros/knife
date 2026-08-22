@@ -16,6 +16,7 @@ import {
   type TargetRow,
   type LineActions,
   type FactRow,
+  type BookmarkRow,
   type PatchRun,
   type DriverReport,
   type PathRow,
@@ -156,6 +157,8 @@ export default function App() {
   const [strings, setStrings] = useState<StringRow[]>([]);
   const [symbols, setSymbols] = useState<SymbolRow[]>([]);
   const [facts, setFacts] = useState<FactRow[]>([]);
+  // Bookmarks for the open binary; reloaded whenever the target changes.
+  const [marks, setMarks] = useState<BookmarkRow[]>([]);
   const [patches, setPatches] = useState<PatchRun[]>([]);
   const [driver, setDriver] = useState<DriverReport | null>(null);
   // The unfiltered report, fetched at open on a driver, for the inline primitive markers.
@@ -253,6 +256,12 @@ export default function App() {
     }
     return out;
   }, [find, tab, ir, lines]);
+
+  // Bookmarks ride on the open target; refetch when it changes.
+  useEffect(() => {
+    if (!opened) return;
+    api.bookmarksList(opened.path).then(setMarks).catch(() => setMarks([]));
+  }, [opened?.path]);
 
   /// Remember the target and function so the next launch resumes here.
   const remember = useCallback((path: string, at: string | null) => {    try {
@@ -768,6 +777,19 @@ export default function App() {
           void navigator.clipboard.writeText(curName);
           setError(`copied ${curName}`);
           break;
+        case "m":
+          if (opened && (selected || current)) {
+            e.preventDefault();
+            const at = (selected ?? current!).toLowerCase();
+            api
+              .bookmarkToggle(opened.path, at)
+              .then(async (marked) => {
+                setMarks(await api.bookmarksList(opened.path));
+                setError(marked ? `marked ${at}` : `unmarked ${at}`);
+              })
+              .catch((err) => setError(String(err)));
+          }
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1241,7 +1263,18 @@ export default function App() {
                       }
                     />
                   </div>
-                  <FactsList rows={facts} onJump={(a) => openFunction(a)} />
+                  <FactsList
+                    rows={facts}
+                    marks={marks}
+                    onJump={(a) => openFunction(a)}
+                    onUnmark={(a) => {
+                      if (!opened) return;
+                      api
+                        .bookmarkToggle(opened.path, a)
+                        .then(() => api.bookmarksList(opened.path).then(setMarks))
+                        .catch((err) => setError(String(err)));
+                    }}
+                  />
                 </>
               ) : leftView === "patches" ? (
                 <>
@@ -1614,7 +1647,7 @@ export default function App() {
           })()}
           <div className="spacer" />
           <span className="sb-keys">
-            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
+            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
           </span>
         </div>
       )}

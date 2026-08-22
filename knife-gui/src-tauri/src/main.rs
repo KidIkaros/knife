@@ -9,6 +9,7 @@
 //! `commands.rs` for the IPC handlers and `state.rs` for the cached session.
 
 mod agent;
+mod bookmarks;
 mod commands;
 mod console;
 mod driver_cmds;
@@ -84,6 +85,8 @@ fn main() {
             workspace_cmds::analyst_facts,
             workspace_cmds::line_actions,
             driver_cmds::driver_report,
+            bookmarks::bookmarks_list,
+            bookmarks::bookmark_toggle,
             workspace_cmds::import_typelib,
             workspace_cmds::export_typelib,
         ])

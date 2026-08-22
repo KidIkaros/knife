@@ -137,6 +137,13 @@ body {
   text-align: center;
 }
 
+/* the ⚑ before a bookmark row in the facts panel */
+.fn-row .mark-flag {
+  width: auto;
+  margin-right: 2px;
+  opacity: 0.8;
+}
+
 .rail button:hover {
   color: var(--muted);
   background: #211d1e;
