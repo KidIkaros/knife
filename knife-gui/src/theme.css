@@ -7,20 +7,21 @@
    finding severity, and graph edges. Critical stays the brighter red so a
    severity marker never reads as ordinary chrome sitting beside it. */
 :root {
-  --accent: #b03034;
-  --accent-hi: #bc2c2b;
-  --critical: #f06464;
-  --muted: #8e8b8b;
-  --faint: #5d5a5a;
-  --mint: #79c99e;
-  --amber: #e3b341;
+  --accent: #ff2e45;
+  --accent-hi: #ff667a;
+  --accent-glow: rgba(255, 46, 69, 0.5);
+  --critical: #ff5b60;
+  --muted: #a7a3a3;
+  --faint: #6a6666;
+  --mint: #3dffab;
+  --amber: #ffd23d;
   --canvas: #0b0a0a;
-  --panel: #171616;
-  --panel-2: #121111;
-  --sel-bg: #2f2224;
-  --sel-fg: #e8e6e6;
-  --text: #c4c3c3;
-  --border: #2b2a2b;
+  --panel: #191717;
+  --panel-2: #131111;
+  --sel-bg: #3a2528;
+  --sel-fg: #f2f0f0;
+  --text: #e4e2e2;
+  --border: #322f30;
   --mono: "Cascadia Mono", "JetBrains Mono", "Consolas", ui-monospace, monospace;
 }
 
@@ -2851,4 +2852,47 @@ body {
 .navbtn:not(:disabled):hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* ── Knife-chan brand art ─────────────────────────────────────────────── */
+.welcome-art {
+  width: 200px;
+  height: 200px;
+  object-fit: contain;
+  margin: 0 auto 10px;
+  display: block;
+  filter: drop-shadow(0 0 28px var(--accent-glow));
+  animation: chan-float 5s ease-in-out infinite;
+}
+@keyframes chan-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.brandmark {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  vertical-align: middle;
+  margin-right: 6px;
+  filter: drop-shadow(0 0 5px var(--accent-glow));
+}
+
+.agent-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center 32%;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+  flex: 0 0 20px;
+}
+
+/* a touch of glow on the brighter accents */
+.brand {
+  text-shadow: 0 0 14px var(--accent-glow);
+}
+.risk-dot.s3 {
+  box-shadow: 0 0 5px var(--critical);
 }

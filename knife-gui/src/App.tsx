@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import knifechan from "./assets/knifechan.png";
 import { listen } from "@tauri-apps/api/event";
 import {
   api,
@@ -1243,6 +1244,7 @@ export default function App() {
     <div className="app">
       <div className="topbar">
         <span className="brand">
+          <img className="brandmark" src={knifechan} alt="" draggable={false} />
           <span className="slash">╱</span> KNIFE
         </span>
         {opened && (
@@ -1417,6 +1419,7 @@ export default function App() {
         {!opened ? (
           <div className="welcome">
             <div>
+              <img className="welcome-art" src={knifechan} alt="" draggable={false} />
               <div className="big">╱ knife</div>
               <div className="sub">Find the bug, not just the binary.</div>
               <div style={{ marginTop: 16 }}>

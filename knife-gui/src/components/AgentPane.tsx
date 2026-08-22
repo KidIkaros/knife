@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type Applied, type AgentStep, type ChatMessage, type Suggestion } from "../api";
 import { Markdown } from "./Markdown";
+import knifechan from "../assets/knifechan.png";
 
 export type AgentDock = "bottom" | "left" | "right";
 
@@ -354,6 +355,7 @@ export function AgentPane({
   return (
     <div className={`agent dock-${dock}`}>
       <div className="panel-head">
+        <img className="agent-avatar" src={knifechan} alt="" draggable={false} />
         <span>agent</span>
         {isDriver && <span className="agent-mode">LPE hunt</span>}
         <div className="spacer" />
