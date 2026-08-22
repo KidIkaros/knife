@@ -229,6 +229,22 @@ export default function App() {
 
   const curName = functions.find((f) => f.addr === current)?.name ?? current ?? "";
 
+  // Reflect the open binary in Discord Rich Presence (no-op if not configured).
+  useEffect(() => {
+    if (opened) {
+      const bits = [`${opened.functions} functions`];
+      if (opened.high_risk) bits.push(`${opened.high_risk} high-risk`);
+      api
+        .presenceUpdate(
+          opened.is_driver ? "Hunting a driver" : "Reverse engineering",
+          `${opened.title} · ${bits.join(" · ")}`,
+        )
+        .catch(() => {});
+    } else {
+      api.presenceUpdate("Idle", "no binary open").catch(() => {});
+    }
+  }, [opened]);
+
   // The audit findings, indexed for the views: highest severity per function for
   // the list's risk dots, and per-address for the inline markers in the code.
   const riskByFunc = useMemo(() => {

@@ -15,6 +15,7 @@ mod console;
 mod driver_cmds;
 mod dto;
 mod idents;
+mod presence;
 mod state;
 mod symbols;
 #[cfg(windows)]
@@ -37,6 +38,7 @@ fn main() {
                     }
                 }
             }
+            presence::init();
             let _ = app;
             Ok(())
         })
@@ -59,6 +61,7 @@ fn main() {
             agent::agent_ask,
             agent::agent_cancel,
             agent::agent_autopilot,
+            presence::presence_update,
             commands::cfg,
             commands::call_graph,
             commands::export_dot,

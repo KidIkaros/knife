@@ -26,6 +26,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 tokio = { version = "1", features = ["macros"] }
 futures-util = "0.3"
+
+# Discord Rich Presence talks to Discord's local IPC pipe; best-effort, no-op
+# when Discord is not running. GUI-only, so reknife stays clean.
+discord-rich-presence = "0.2"
 keyring = { version = "3", features = ["windows-native"] }
 
 # Windows hands the taskbar whatever icon the window reports, and by default
