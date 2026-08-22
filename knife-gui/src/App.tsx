@@ -1823,7 +1823,12 @@ export default function App() {
                   dir={xrefDir}
                   onDir={setXrefDir}
                   about={xrefTarget}
-                  onJump={(a) => openFunction(a)}
+                  onJump={async (a) => {
+                    await openFunction(a);
+                    // Caller rows carry the exact referencing instruction;
+                    // land on that line, not just inside its function.
+                    setSelected(a);
+                  }}
                 />
             </div>
 

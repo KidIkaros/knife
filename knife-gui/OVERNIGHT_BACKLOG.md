@@ -6,11 +6,13 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Xref pane: clicking a caller row selects the exact call site in the listing,
-      not just its containing function.
 - [ ] Persist the left-pane view and severity filter with the session restore.
 
 ## Done
+- [x] Xref pane: clicking a caller row selects the exact call site in the listing,
+      not just its containing function.
+      — done: onJump awaits openFunction then setSelected(site); callee/entry
+      rows land on their first line as before.
 - [x] Driver rail icon escalates to red when the kernel surface is critical
       (raw-buffer IOCTLs or reachable high-severity primitives).
       — done: amber dot turns critical-red (flag crit), tooltip names why.
