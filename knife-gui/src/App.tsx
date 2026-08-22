@@ -1255,6 +1255,11 @@ export default function App() {
                     onToggleReachable={() => setDrvReach((v) => !v)}
                     onToggleCritical={() => setDrvCrit((v) => !v)}
                     onJump={(a) => openFunction(a)}
+                    onPseudo={(a) => {
+                      // The decompile is lazy: open the function, then show
+                      // its pseudocode tab and let the effect fetch it.
+                      void openFunction(a).then(() => setTab("pseudo"));
+                    }}
                   />
                 </>
               ) : leftView === "facts" ? (

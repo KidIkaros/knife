@@ -51,7 +51,9 @@ API changes.
       — done: toggleable H/M/L chips in the panel head; display-only, cycling
       and the statusbar position still walk the full ranked list.
 - [ ] Severity filter chips (H/M/L) on the attack-surface list.
-- [ ] Driver view: primitives deep-link to pseudocode, not just the listing.
+- [x] Driver view: primitives deep-link to pseudocode, not just the listing.
+      — done: a "p" chip on each primitive row opens the first call site's
+      function and lands on its pseudocode tab (decompile stays lazy).
 - [ ] Strings list: reference counts and jump-to-xref.
 - [ ] Remember the last-used graph/calls tab per session restore.
 

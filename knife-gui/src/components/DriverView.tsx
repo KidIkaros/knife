@@ -15,6 +15,7 @@ export function DriverView({
   onToggleReachable,
   onToggleCritical,
   onJump,
+  onPseudo,
 }: {
   report: DriverReport | null;
   reachableOnly: boolean;
@@ -22,6 +23,7 @@ export function DriverView({
   onToggleReachable: () => void;
   onToggleCritical: () => void;
   onJump: (addr: string) => void;
+  onPseudo: (addr: string) => void;
 }) {
   if (!report) {
     return (
@@ -145,6 +147,18 @@ export function DriverView({
             {p.class} {p.sites.length} site{p.sites.length === 1 ? "" : "s"}
             {p.reachable ? " reachable" : ""}
           </span>
+          {p.sites[0] && (
+            <span
+              className="dlink"
+              title="open the first call site in pseudocode"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPseudo(p.sites[0].from);
+              }}
+            >
+              p
+            </span>
+          )}
         </div>
       ))}
     </div>

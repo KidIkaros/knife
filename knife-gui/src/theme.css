@@ -1618,6 +1618,21 @@ body {
   border-color: var(--accent);
 }
 
+/* the p link on a primitive row: open the call site in pseudocode */
+.dlink {
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.dlink:hover {
+  color: var(--accent-hi);
+  border-color: var(--accent-hi);
+}
+
 .rail button.flag {
   position: relative;
 }
