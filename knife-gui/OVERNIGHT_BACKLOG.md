@@ -42,6 +42,15 @@ API changes.
       16-byte rows with an ascii gutter; ‹ › page by 64 bytes, Esc closes.
 
 ## New items
+- [x] METHOD_NEITHER IOCTLs flagged in the driver view (raw user buffer —
+      classic LPE pattern).
+      — done: the code renders in critical red with a "raw buffer" tag and a
+      tooltip explaining what METHOD_NEITHER hands the driver.
+- [ ] Findings-in-function strip above the code view: one-click walk of the
+      sinks in the open function.
+- [ ] Palette: search strings and symbols, not just functions.
+- [ ] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
+- [ ] Keyboard help overlay (? key) listing every binding.
 - [x] Reachability proof inline: show the actual call chain from an entry point
       or export to a picked finding in the evidence pane (paths_to already
       accepts the sink address).

@@ -88,19 +88,30 @@ export function DriverView({
       ))}
 
       <div className="sym-module">IOCTLS ({report.ioctls.length})</div>
-      {report.ioctls.map((c, i) => (
-        <div
-          key={i}
-          className="drow"
-          onClick={() => onJump(c.addr)}
-          title={`CTL_CODE(${c.device_type}, ${c.function}, ${c.method}, ${c.access})`}
-        >
-          <span className="dname">{c.code}</span>
-          <span className="ddetail">
-            dev {c.device_type} · fn {c.function} · {c.method} · access {c.access}
-          </span>
-        </div>
-      ))}
+      {report.ioctls.map((c, i) => {
+        // METHOD_NEITHER hands the raw user-mode pointer to the driver: no
+        // SystemBuffer, no probing by the I/O manager. It is the access method
+        // behind a whole class of kernel LPEs, so it gets flagged on sight.
+        const neither = c.method === "METHOD_NEITHER";
+        return (
+          <div
+            key={i}
+            className="drow"
+            onClick={() => onJump(c.addr)}
+            title={`CTL_CODE(${c.device_type}, ${c.function}, ${c.method}, ${c.access})${
+              neither
+                ? " — METHOD_NEITHER: the user buffer arrives unvalidated; check UserBuffer handling before trusting it"
+                : ""
+            }`}
+          >
+            <span className={"dname" + (neither ? " bad" : "")}>{c.code}</span>
+            <span className="ddetail">
+              dev {c.device_type} · fn {c.function} · {c.method} · access {c.access}
+              {neither ? " · raw buffer" : ""}
+            </span>
+          </div>
+        );
+      })}
 
       <div className="sym-module">
         PRIMITIVES ({report.primitives.length})
