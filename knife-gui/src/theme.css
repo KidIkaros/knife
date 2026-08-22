@@ -1787,6 +1787,33 @@ body {
   border-color: var(--accent-hi);
 }
 
+/* the accepted-code chips under a dispatch handler */
+.dsub {
+  padding-left: 22px !important;
+  flex-wrap: wrap;
+  gap: 4px !important;
+  cursor: default;
+}
+
+.ioctlchip {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ioctlchip:hover {
+  color: var(--accent-hi);
+  border-color: var(--accent-hi);
+}
+
+.ioctlchip.bad {
+  color: var(--critical);
+  border-color: var(--critical);
+}
+
 .rail button.flag {
   position: relative;
 }

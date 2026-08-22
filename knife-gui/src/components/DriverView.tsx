@@ -12,6 +12,7 @@ export function DriverView({
   report,
   reachableOnly,
   criticalOnly,
+  ioctlsByHandler,
   onToggleReachable,
   onToggleCritical,
   onJump,
@@ -20,6 +21,8 @@ export function DriverView({
   report: DriverReport | null;
   reachableOnly: boolean;
   criticalOnly: boolean;
+  /** IOCTLs keyed by their containing handler's address. */
+  ioctlsByHandler?: Map<string, Array<{ code: string; addr: string; method: string }>>;
   onToggleReachable: () => void;
   onToggleCritical: () => void;
   onJump: (addr: string) => void;
@@ -78,14 +81,36 @@ export function DriverView({
       ))}
 
       <div className="sym-module">IRP DISPATCH ({report.irp.length})</div>
-      {report.irp.map((h, i) => (
-        <div key={i} className="drow" onClick={() => onJump(h.addr)}>
-          <span className="dname">{h.derived || h.name}</span>
-          <span className="ddetail">
-            {h.major} {h.addr.replace("0x", "")}
-          </span>
-        </div>
-      ))}
+      {report.irp.map((h, i) => {
+        const codes = ioctlsByHandler?.get(h.addr) ?? [];
+        return (
+          <div key={i}>
+            <div className="drow" onClick={() => onJump(h.addr)}>
+              <span className="dname">{h.derived || h.name}</span>
+              <span className="ddetail">
+                {h.major} {h.addr.replace("0x", "")}
+              </span>
+            </div>
+            {codes.length > 0 && (
+              <div className="drow dsub" title="IOCTL codes this handler accepts">
+                {codes.map((c) => (
+                  <span
+                    key={c.addr}
+                    className={"ioctlchip" + (c.method === "METHOD_NEITHER" ? " bad" : "")}
+                    title={`${c.code} · ${c.method} — click to open the comparison`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onJump(c.addr);
+                    }}
+                  >
+                    {c.code}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
 
       <div className="sym-module">IOCTLS ({report.ioctls.length})</div>
       {report.ioctls.map((c, i) => {

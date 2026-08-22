@@ -272,6 +272,25 @@ export default function App() {
     [driverFull],
   );
 
+  // IOCTL codes grouped by the dispatch function that decodes them, so the
+  // driver view can show each handler's accepted codes beneath it.
+  const ioctlsByHandler = useMemo(() => {
+    const m = new Map<string, Array<{ code: string; addr: string; method: string }>>();
+    if (!driverFull) return m;
+    for (const c of driverFull.ioctls) {
+      const site = BigInt(c.addr);
+      const host = functions.find((f) => {
+        const fa = BigInt(f.addr);
+        return site >= fa && site < fa + BigInt(f.size);
+      });
+      const key = host?.addr ?? c.addr;
+      const list = m.get(key) ?? [];
+      list.push({ code: c.code, addr: c.addr, method: c.method });
+      m.set(key, list);
+    }
+    return m;
+  }, [driverFull, functions]);
+
   // Show a finding's evidence: pick it and switch to the attack-surface view.
   const showFinding = useCallback((f: Finding) => {
     setPickedFinding(f);
@@ -1465,6 +1484,7 @@ export default function App() {
                     report={driver}
                     reachableOnly={drvReach}
                     criticalOnly={drvCrit}
+                    ioctlsByHandler={ioctlsByHandler}
                     onToggleReachable={() => setDrvReach((v) => !v)}
                     onToggleCritical={() => setDrvCrit((v) => !v)}
                     onJump={(a) => openFunction(a)}

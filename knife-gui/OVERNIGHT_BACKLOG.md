@@ -6,9 +6,14 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-(none — append new items below)
+- [ ] Hex inspector: seek to an embedded pointer (click a plausible qword).
+- [ ] FunctionList: severity dot legend on hover.
 
 ## Done
+- [x] Per-handler IOCTLs in the driver view: under each dispatch handler, list
+      the IOCTL codes decoded inside it (containment via the function list).
+      — done: chips under each IRP row, click opens the comparison site;
+      METHOD_NEITHER codes render red.
 - [x] Persist the left-pane view and severity filter with the session restore.
       — done: knife.leftView / knife.sev saved on change, validated and applied
       when the last target reopens (alongside knife.tab).
