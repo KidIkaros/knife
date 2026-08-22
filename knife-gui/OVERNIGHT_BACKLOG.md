@@ -47,6 +47,9 @@ API changes.
       accepts the sink address).
       — done: a "proof" row walks up to 3 chains from entry/exports to the sink
       on pick; hops are clickable, absence says so plainly.
+- [x] Severity filter chips (H/M/L) on the attack-surface list.
+      — done: toggleable H/M/L chips in the panel head; display-only, cycling
+      and the statusbar position still walk the full ranked list.
 - [ ] Severity filter chips (H/M/L) on the attack-surface list.
 - [ ] Driver view: primitives deep-link to pseudocode, not just the listing.
 - [ ] Strings list: reference counts and jump-to-xref.

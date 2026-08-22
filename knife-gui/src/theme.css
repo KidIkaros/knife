@@ -195,6 +195,35 @@ body {
   color: var(--accent-hi);
 }
 
+/* H/M/L severity chips in a panel head */
+.panel-head .chips {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-head .chip {
+  min-width: 15px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 14px;
+  cursor: pointer;
+  color: var(--faint);
+}
+
+.panel-head .chip:hover {
+  color: var(--muted);
+  border-color: var(--faint);
+}
+
+.panel-head .chip.on {
+  color: #f5eeee;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 /* section-entropy bar in the detail panel */
 .ent {
   display: inline-block;

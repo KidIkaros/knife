@@ -162,6 +162,8 @@ export default function App() {
   const [marks, setMarks] = useState<BookmarkRow[]>([]);
   // The hex inspector's address, or null while it is closed.
   const [inspectAt, setInspectAt] = useState<string | null>(null);
+  // Attack-surface severity filter: null shows everything.
+  const [sevFilter, setSevFilter] = useState<3 | 2 | 1 | null>(null);
   const [patches, setPatches] = useState<PatchRun[]>([]);
   const [driver, setDriver] = useState<DriverReport | null>(null);
   // The unfiltered report, fetched at open on a driver, for the inline primitive markers.
@@ -1360,6 +1362,24 @@ export default function App() {
                 <>
                   <div className="panel-head">
                     <span>attack surface</span>
+                    <span className="chips">
+                      {([3, 2, 1] as const).map((s) => (
+                        <span
+                          key={s}
+                          className={"chip" + (sevFilter === s ? " on" : "")}
+                          title={
+                            s === 3
+                              ? "high severity only"
+                              : s === 2
+                                ? "medium severity only"
+                                : "low severity only"
+                          }
+                          onClick={() => setSevFilter((v) => (v === s ? null : s))}
+                        >
+                          {s === 3 ? "H" : s === 2 ? "M" : "L"}
+                        </span>
+                      ))}
+                    </span>
                     <span
                       className="panel-action"
                       title="write the ranked findings to a markdown report"
@@ -1382,7 +1402,15 @@ export default function App() {
                     <span className="count">({findings.length})</span>
                   </div>
                   <AttackSurface
-                    findings={findings}
+                    findings={
+                      sevFilter === 3
+                        ? findings.filter((f) => f.severity >= 3)
+                        : sevFilter === 2
+                          ? findings.filter((f) => f.severity === 2)
+                          : sevFilter === 1
+                            ? findings.filter((f) => f.severity <= 1)
+                            : findings
+                    }
                     selected={pickedFinding?.addr ?? selected}
                     onPick={(f) => {
                       setPickedFinding(f);
