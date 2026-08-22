@@ -48,8 +48,12 @@ API changes.
       — done: a "Kernel surface" section with entry/devices/irp/ioctls/
       primitives; the head badge calls out raw-buffer ioctls and reachable
       criticals in red, "no critical surface" otherwise.
-- [ ] Filter box for the strings list (backend filter exists).
-- [ ] Evidence pane: copy the proof chain as text for report writing.
+- [x] Filter box for the strings list (backend filter exists).
+      — done already: the pane has had a live backend-filtered input since the
+      strings view landed; nothing to add.
+- [x] Evidence pane: copy the proof chain as text for report writing.
+      — done: a "copy" link beside the proof rows writes the chains
+      (A → B → sink, one per line) to the clipboard; flips to "copied".
 - [ ] Alt-click a chip in the findings strip to open its evidence.
 - [ ] Recent targets on the welcome screen (list_targets).
 - [x] METHOD_NEITHER IOCTLs flagged in the driver view (raw user buffer —

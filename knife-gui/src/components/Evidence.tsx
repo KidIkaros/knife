@@ -21,12 +21,14 @@ export function Evidence({
   onPaths: () => void;
 }) {
   const [paths, setPaths] = useState<PathRow[] | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // The walk is per finding; refetch when the picked sink changes.
   useEffect(() => {
     if (!finding) return;
     let live = true;
     setPaths(null);
+    setCopied(false);
     api
       .pathsTo(finding.addr, 3)
       .then((p) => live && setPaths(p))
@@ -35,6 +37,11 @@ export function Evidence({
       live = false;
     };
   }, [finding?.addr]);
+
+  const chainText = (rows: PathRow[]) =>
+    rows
+      .map((p) => p.hops.map((h) => `${h.name || h.addr}`).join(" → "))
+      .join("\n");
 
   if (!finding) return null;
 
@@ -108,6 +115,19 @@ export function Evidence({
                   </div>
                 ))}
         </span>
+        {paths !== null && paths.length > 0 && (
+          <span
+            className="elink"
+            title="copy the chains as text"
+            onClick={() => {
+              void navigator.clipboard.writeText(chainText(paths));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            }}
+          >
+            {copied ? "copied" : "copy"}
+          </span>
+        )}
       </div>
     </div>
   );
