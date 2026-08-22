@@ -261,6 +261,17 @@ export default function App() {
     return m;
   }, [driverFull]);
 
+  // The driver icon escalates from amber to red when the kernel surface is
+  // actually critical: a raw-buffer IOCTL, or a high-severity primitive user
+  // mode can reach. One glance at the rail says "open this one first".
+  const drvCritical = useMemo(
+    () =>
+      !!driverFull &&
+      (driverFull.ioctls.some((c) => c.method === "METHOD_NEITHER") ||
+        driverFull.primitives.some((p) => p.severity >= 3 && p.reachable)),
+    [driverFull],
+  );
+
   // Show a finding's evidence: pick it and switch to the attack-surface view.
   const showFinding = useCallback((f: Finding) => {
     setPickedFinding(f);
@@ -1300,9 +1311,16 @@ export default function App() {
           </button>
           <button
             className={
-              (leftView === "driver" ? "active" : "") + (opened?.is_driver ? " flag" : "")
+              (leftView === "driver" ? "active" : "") +
+              (opened?.is_driver ? (drvCritical ? " flag crit" : " flag") : "")
             }
-            title={opened?.is_driver ? "Driver analysis" : "Driver analysis (not a driver)"}
+            title={
+              opened?.is_driver
+                ? drvCritical
+                  ? "Driver analysis — critical surface: raw-buffer ioctl or reachable high-severity primitive"
+                  : "Driver analysis"
+                : "Driver analysis (not a driver)"
+            }
             onClick={() => pickLeft("driver")}
           >
             <IconDriver />

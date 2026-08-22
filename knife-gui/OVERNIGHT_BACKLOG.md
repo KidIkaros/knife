@@ -6,9 +6,14 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-(none — append new items below)
+- [ ] Xref pane: clicking a caller row selects the exact call site in the listing,
+      not just its containing function.
+- [ ] Persist the left-pane view and severity filter with the session restore.
 
 ## Done
+- [x] Driver rail icon escalates to red when the kernel surface is critical
+      (raw-buffer IOCTLs or reachable high-severity primitives).
+      — done: amber dot turns critical-red (flag crit), tooltip names why.
 - [x] Finding navigation indicator: show "⚑ i/N" in the status bar while cycling
       findings with . / , so position is visible. (uses existing findings state)
       — done: sb-finding span keyed off pickedFinding, accent-colored.

@@ -1802,6 +1802,12 @@ body {
   background: var(--amber);
 }
 
+/* a driver whose kernel surface is critical: raw-buffer ioctl or a
+   reachable high-severity primitive */
+.rail button.flag.crit::after {
+  background: var(--critical);
+}
+
 /* ── signing detail ───────────────────────────────────────────────────── */
 .thumb {
   font-size: 11px;
