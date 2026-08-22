@@ -58,6 +58,7 @@ fn main() {
             agent::agent_ask,
             agent::agent_cancel,
             commands::cfg,
+            commands::call_graph,
             commands::strings_list,
             console::console_exec,
             symbols::imports,

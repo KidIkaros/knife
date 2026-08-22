@@ -139,7 +139,9 @@ export interface BinaryDetail {
 export interface CfgNode {
   id: string;
   addr: string;
-  kind: "entry" | "block";
+  // The card model serves both graphs: blocks in a CFG, functions and
+  // imports in a call closure.
+  kind: "entry" | "block" | "function" | "import" | "external";
   insns: string[];
   count: number;
   bytes: number;
@@ -312,6 +314,8 @@ export const api = {
   attackSurface: () => invoke<Finding[]>("attack_surface"),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
+  callGraph: (selector: string, maxNodes?: number) =>
+    invoke<Cfg>("call_graph", { selector, maxNodes }),
   strings: (filter?: string, referencedOnly?: boolean, limit?: number) =>
     invoke<StringRow[]>("strings_list", { filter, referencedOnly, limit }),
   listTargets: () => invoke<TargetRow[]>("list_targets"),

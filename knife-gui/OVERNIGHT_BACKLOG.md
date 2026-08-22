@@ -6,7 +6,6 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Whole-program call graph: expose graphs::call_graph and add a navigable view.
 - [ ] Bookmarks: mark/unmark an address (IDA marks), persisted per binary, list panel.
 - [ ] Findings report export: write the ranked findings to a markdown file.
 - [ ] Section entropy in the detail panel (spot packed/encrypted regions).
@@ -25,6 +24,10 @@ API changes.
       method / access, shown per handler.
       — done: all four fields were already in the DTO; the row now shows
       dev/fn/method/access and tooltips the CTL_CODE() form.
+- [x] Whole-program call graph: expose graphs::call_graph and add a navigable view.
+      — done as a rooted closure: new call_graph command (graphs::call_graph with
+      roots={current fn}, refused past 96 nodes) + a calls tab reusing the graph
+      view; cards open the function on double-click.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;

@@ -318,6 +318,81 @@ pub fn cfg(state: State<AppState>, selector: String) -> Result<CfgDto, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The call closure of one function: everything it reaches, transitively.
+///
+/// Rooted at the resolved function, so the question "what can this IOCTL
+/// handler actually call" gets one navigable picture. Imports appear as leaf
+/// cards, internal functions open on double-click. A closure that would not
+/// fit a readable picture is refused rather than drawn unreadable — open a
+/// callee instead and its own closure is one click away.
+#[tauri::command]
+pub fn call_graph(
+    state: State<AppState>,
+    selector: String,
+    max_nodes: Option<usize>,
+) -> Result<CfgDto, String> {
+    state
+        .read(|l| {
+            let an = &l.session.an;
+            let f =
+                resolve(an, &selector).ok_or_else(|| anyhow!("nothing matches {selector:?}"))?;
+            let cap = max_nodes.unwrap_or(96).max(8);
+            let mut roots = std::collections::BTreeSet::new();
+            roots.insert(f.addr);
+            let graph = graphs::call_graph(&an.functions, &an.imports, Some(&roots));
+            if graph.nodes.len() > cap {
+                return Err(anyhow!(
+                    "the call closure from {} spans {} nodes; open a callee to go deeper",
+                    f.name,
+                    graph.nodes.len()
+                ));
+            }
+            // The frontend has one card model for both graphs: a function card
+            // shows its name where a block showed instructions, and its size
+            // where a block showed an instruction count.
+            let by_addr: std::collections::BTreeMap<u64, &Function> =
+                an.functions.iter().map(|x| (x.addr, x)).collect();
+            // `graphs` ids nodes its own way; re-key on the address so the
+            // frontend has one id space.
+            let index: std::collections::BTreeMap<&str, String> = graph
+                .nodes
+                .iter()
+                .map(|n| (n.id.as_str(), hex(n.address)))
+                .collect();
+            let nodes = graph
+                .nodes
+                .iter()
+                .map(|n| CfgNode {
+                    id: hex(n.address),
+                    addr: hex(n.address),
+                    kind: if n.address == f.addr { "entry" } else { n.kind },
+                    insns: vec![n.label.clone()],
+                    count: by_addr.get(&n.address).map(|x| x.blocks.len()).unwrap_or(0),
+                    bytes: by_addr.get(&n.address).map(|x| x.size).unwrap_or(0),
+                })
+                .collect();
+            let edges = graph
+                .edges
+                .iter()
+                .filter_map(|e| {
+                    Some(CfgEdge {
+                        from: index.get(e.from.as_str())?.clone(),
+                        to: index.get(e.to.as_str())?.clone(),
+                        kind: "call",
+                        back: e.back,
+                    })
+                })
+                .collect();
+            Ok(CfgDto {
+                function: f.name.clone(),
+                entry: hex(f.addr),
+                nodes,
+                edges,
+            })
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn strings_list(
     state: State<AppState>,

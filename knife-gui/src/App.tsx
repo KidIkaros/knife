@@ -53,7 +53,7 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Console } from "./components/Console";
 import { SymbolList } from "./components/SymbolList";
 
-type Tab = "disasm" | "pseudo" | "graph";
+type Tab = "disasm" | "pseudo" | "graph" | "calls";
 type LeftView =
   | "functions"
   | "attack"
@@ -150,6 +150,9 @@ export default function App() {
   const [history, setHistory] = useState<string[]>([]);
 
   const [cfg, setCfg] = useState<Cfg | null>(null);
+  // The current function's call closure, for the calls tab; fetched only when
+  // that tab is shown.
+  const [cgraph, setCgraph] = useState<Cfg | null>(null);
   const [strings, setStrings] = useState<StringRow[]>([]);
   const [symbols, setSymbols] = useState<SymbolRow[]>([]);
   const [facts, setFacts] = useState<FactRow[]>([]);
@@ -252,8 +255,7 @@ export default function App() {
   }, [find, tab, ir, lines]);
 
   /// Remember the target and function so the next launch resumes here.
-  const remember = useCallback((path: string, at: string | null) => {
-    try {
+  const remember = useCallback((path: string, at: string | null) => {    try {
       localStorage.setItem("knife.last", JSON.stringify({ path, at }));
     } catch {
       // resuming is a convenience, not a requirement
@@ -272,6 +274,7 @@ export default function App() {
           api.cfg(selector).catch(() => null),
         ]);
         setCfg(graph);
+        setCgraph(null);
         setActs([]);
         setIr([]);
         setIrSel(null);
@@ -386,6 +389,7 @@ export default function App() {
         setLines([]);
         setIr([]);
         setCfg(null);
+        setCgraph(null);
         setHistory([]);
         setFilter("");
         const fns = await loadViews();
@@ -418,6 +422,7 @@ export default function App() {
           setLines([]);
           setIr([]);
           setCfg(null);
+          setCgraph(null);
         }
       } catch (e) {
         setError(String(e));
@@ -575,6 +580,23 @@ export default function App() {
         .catch(() => setXrefs([]));
     }
   }, [current, xrefDir]);
+
+  // The call closure costs one rooted walk over every function; fetch it only
+  // when the calls tab is actually shown.
+  useEffect(() => {
+    if (tab !== "calls" || !current) return;
+    let live = true;
+    api
+      .callGraph(current)
+      .then((g) => {
+        if (live) setCgraph(g);
+      })
+      .catch((e) => setError(String(e)));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, current]);
 
   // Keyboard map, deliberately the same letters the TUI uses so muscle memory
   // carries between the two front ends. Bare letters are ignored while a text
@@ -1334,6 +1356,12 @@ export default function App() {
                 >
                   graph
                 </div>
+                <div
+                  className={"tab" + (tab === "calls" ? " active" : "")}
+                  onClick={() => setTab("calls")}
+                >
+                  calls
+                </div>
                 <div className="title">
                   {renaming ? (
                     <input
@@ -1423,6 +1451,15 @@ export default function App() {
 
               {tab === "graph" ? (
                 <GraphView cfg={cfg} onOpenBlock={(a) => { setTab("disasm"); setSelected(a); }} />
+              ) : tab === "calls" ? (
+                <GraphView
+                  cfg={cgraph}
+                  onOpenBlock={(a) => {
+                    // A call-graph card is a whole function; open it so its own
+                    // code, pseudocode, and closure are one step away.
+                    void openFunction(a);
+                  }}
+                />
               ) : tab === "pseudo" && ir.length === 0 && pseudoLoading ? (
                 <div className="code decompiling">decompiling…</div>
               ) : (

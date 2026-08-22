@@ -107,6 +107,8 @@ const EDGE_COLOR: Record<string, string> = {
   true: "var(--mint)",
   false: "var(--critical)",
   flow: "var(--faint)",
+  // call-graph edges: the whole point of that picture, so they read strongly
+  call: "var(--mint)",
 };
 
 export function GraphView({
@@ -182,7 +184,7 @@ export function GraphView({
         onMouseLeave={() => (drag.current = null)}
       >
         <defs>
-          {["true", "false", "flow", "back"].map((k) => (
+          {["true", "false", "flow", "back", "call"].map((k) => (
             <marker
               key={k}
               id={`arrow-${k}`}
@@ -241,7 +243,11 @@ export function GraphView({
             >
               <rect width={p.w} height={p.h} rx="7" />
               <text className="bhead" x="10" y="14">
-                {p.node.kind === "entry" ? "entry · " : ""}
+                {p.node.kind === "entry"
+                  ? "entry · "
+                  : p.node.kind === "import"
+                    ? "imp · "
+                    : ""}
                 {p.node.addr.replace("0x", "")}
               </text>
               <text className="bmeta" x={p.w - 10} y="14" textAnchor="end">
