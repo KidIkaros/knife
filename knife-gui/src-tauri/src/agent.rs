@@ -71,6 +71,24 @@ pub struct AgentTurn {
     /// Edits the model proposed. Applying one is the analyst's click; the agent
     /// never writes.
     pub suggestions: Vec<Suggestion>,
+    /// Edits autopilot applied automatically (high-confidence only). Empty for
+    /// an ordinary turn. Each is reversible.
+    pub applied: Vec<Applied>,
+}
+
+/// An edit autopilot applied on its own — a high-confidence rename or note. The
+/// analyst can undo it; every one maps to an existing clear command.
+#[derive(Serialize, Clone)]
+pub struct Applied {
+    /// "rename" or "note".
+    pub kind: &'static str,
+    /// Display address the edit landed on.
+    pub addr: String,
+    pub selector: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// An edit the model recommends. Recording it is read-only; the frontend turns
@@ -205,6 +223,79 @@ fn run_tool(state: &State<AppState>, name: &str, args: &Value) -> Result<String>
             other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
         })
     })
+}
+
+/// Apply the high-confidence renames and notes autopilot proposed, in one edit
+/// (a single re-analysis for the batch). Ordinary turns apply nothing.
+fn apply_high(
+    app: &tauri::AppHandle,
+    state: &State<AppState>,
+    suggestions: &[Suggestion],
+    autopilot: bool,
+) -> Vec<Applied> {
+    if !autopilot {
+        return Vec::new();
+    }
+    let high: Vec<&Suggestion> = suggestions
+        .iter()
+        .filter(|s| s.confidence == "high" && matches!(s.kind, "rename" | "note"))
+        .collect();
+    if high.is_empty() {
+        return Vec::new();
+    }
+    let applied = state
+        .edit(|sess| {
+            let base = reknife::analysis::engine::display_base(&sess.bin);
+            let mut applied: Vec<Applied> = Vec::new();
+            for s in &high {
+                match s.kind {
+                    "rename" => {
+                        let Some(new) = s.new_name.as_deref() else {
+                            continue;
+                        };
+                        if !reknife::db::valid_identifier(new) {
+                            continue;
+                        }
+                        let Some(f) = crate::commands::resolve(&sess.an, &s.selector) else {
+                            continue;
+                        };
+                        let va = f.addr;
+                        sess.db.set_name(va.wrapping_sub(base), new);
+                        applied.push(Applied {
+                            kind: "rename",
+                            addr: format!("0x{va:x}"),
+                            selector: s.selector.clone(),
+                            name: Some(new.to_string()),
+                            note: None,
+                        });
+                    }
+                    "note" => {
+                        let Some(text) = s.note.as_deref() else {
+                            continue;
+                        };
+                        let va = crate::commands::resolve(&sess.an, &s.selector)
+                            .map(|f| f.addr)
+                            .or_else(|| crate::commands::parse_addr(&s.selector).ok());
+                        let Some(va) = va else { continue };
+                        sess.db.set_note(va.wrapping_sub(base), text);
+                        applied.push(Applied {
+                            kind: "note",
+                            addr: format!("0x{va:x}"),
+                            selector: s.selector.clone(),
+                            name: None,
+                            note: Some(text.to_string()),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(applied)
+        })
+        .unwrap_or_default();
+    for a in &applied {
+        emit(app, json!({ "kind": "applied", "applied": a }));
+    }
+    applied
 }
 
 fn system_prompt(target: &str, is_driver: bool, autopilot: bool) -> String {
@@ -472,11 +563,13 @@ async fn agent_turn(
 
         if tools.is_empty() {
             emit(&app, json!({ "kind": "done" }));
+            let applied = apply_high(&app, &state, &suggestions, autopilot);
             return Ok(AgentTurn {
                 reply: content,
                 steps,
                 history: messages,
                 suggestions,
+                applied,
             });
         }
 
@@ -616,11 +709,13 @@ async fn agent_turn(
         tool_call_id: None,
         name: None,
     });
+    let applied = apply_high(&app, &state, &suggestions, autopilot);
     Ok(AgentTurn {
         reply,
         steps,
         history: messages,
         suggestions,
+        applied,
     })
 }
 

@@ -302,11 +302,20 @@ export interface Suggestion {
   reason: string;
 }
 
+export interface Applied {
+  kind: "rename" | "note";
+  addr: string;
+  selector: string;
+  name?: string;
+  note?: string;
+}
+
 export interface AgentTurn {
   reply: string;
   steps: AgentStep[];
   history: ChatMessage[];
   suggestions: Suggestion[];
+  applied: Applied[];
 }
 
 export const api = {

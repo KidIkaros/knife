@@ -2704,3 +2704,58 @@ body {
 .sug-conf.c-low {
   color: var(--faint);
 }
+
+/* autopilot auto-applied edits */
+.applied {
+  margin-top: 8px;
+  border: 1px solid var(--mint);
+  border-radius: 8px;
+  background: #0e1613;
+  padding: 6px 8px;
+}
+.applied-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.applied-tag {
+  color: var(--mint);
+  font-size: 11px;
+  font-weight: 700;
+}
+.applied-undo {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 1px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.applied-undo:hover {
+  border-color: var(--muted);
+}
+.applied-item {
+  display: flex;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 1px 0;
+  cursor: pointer;
+}
+.applied-item:hover .ai-text {
+  color: var(--accent);
+}
+.ai-kind {
+  color: var(--mint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.ai-text {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

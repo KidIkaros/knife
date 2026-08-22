@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, type AgentStep, type ChatMessage, type Suggestion } from "../api";
+import { api, type Applied, type AgentStep, type ChatMessage, type Suggestion } from "../api";
 import { Markdown } from "./Markdown";
 
 export type AgentDock = "bottom" | "left" | "right";
@@ -10,6 +10,7 @@ interface Turn {
   reply: string;
   steps: AgentStep[];
   suggestions: Suggestion[];
+  applied: Applied[];
 }
 
 interface Live {
@@ -26,6 +27,7 @@ type AgentEvent =
   | { kind: "tool"; tool: string; args: string }
   | { kind: "result"; tool: string; preview: string }
   | { kind: "suggestion"; suggestion: Suggestion }
+  | { kind: "applied" }
   | { kind: "done" };
 
 const chatKey = (target: string) => `knife.agent.chat.${target}`;
@@ -65,6 +67,7 @@ export function AgentPane({
   onClose,
   onJump,
   onApply,
+  onApplied,
 }: {
   enabled: boolean;
   consented: boolean;
@@ -81,6 +84,7 @@ export function AgentPane({
   onClose: () => void;
   onJump: (addr: string) => void;
   onApply: (s: Suggestion) => Promise<void>;
+  onApplied: () => Promise<void> | void;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [history, setHistory] = useState<ChatMessage[]>([]);
@@ -146,6 +150,8 @@ export function AgentPane({
             return { ...l, suggestions: [...l.suggestions, ev.suggestion] };
           case "done":
             return { ...l, status: "" };
+          default:
+            return l;
         }
       });
     });
@@ -165,9 +171,16 @@ export function AgentPane({
       const t = await api.agentAsk(model, q, history);
       setTurns((all) => [
         ...all,
-        { question: q, reply: t.reply, steps: t.steps, suggestions: t.suggestions },
+        {
+          question: q,
+          reply: t.reply,
+          steps: t.steps,
+          suggestions: t.suggestions,
+          applied: t.applied,
+        },
       ]);
       setHistory(t.history);
+      if (t.applied.length) await onApplied();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -196,9 +209,11 @@ export function AgentPane({
           reply: t.reply,
           steps: t.steps,
           suggestions: t.suggestions,
+          applied: t.applied,
         },
       ]);
       setHistory(t.history);
+      if (t.applied.length) await onApplied();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -242,6 +257,42 @@ export function AgentPane({
           <div className="step" key={j} title={s.preview}>
             <span className="stool">{s.tool}</span>
             {stepArgs(s.args) && <span className="sargs">{stepArgs(s.args)}</span>}
+          </div>
+        ))}
+      </div>
+    );
+
+  const undoApplied = async (list: Applied[]) => {
+    for (const a of list) {
+      try {
+        if (a.kind === "rename") await api.clearName(a.addr);
+        else await api.clearNote(a.addr);
+      } catch {
+        // best-effort; a manual re-edit may have removed it already
+      }
+    }
+    await onApplied();
+  };
+
+  const renderApplied = (list: Applied[]) =>
+    list.length > 0 && (
+      <div className="applied">
+        <div className="applied-head">
+          <span className="applied-tag">
+            ⚡ autopilot applied {list.length} edit{list.length > 1 ? "s" : ""}
+          </span>
+          <button className="applied-undo" onClick={() => void undoApplied(list)}>
+            undo
+          </button>
+        </div>
+        {list.map((a, i) => (
+          <div className="applied-item" key={i} onClick={() => onJump(a.addr)}>
+            <span className="ai-kind">{a.kind}</span>
+            <span className="ai-text">
+              {a.selector}
+              {a.name ? ` → ${a.name}` : ""}
+              {a.note ? `: ${a.note}` : ""}
+            </span>
           </div>
         ))}
       </div>
@@ -391,6 +442,7 @@ export function AgentPane({
                   <Markdown text={t.reply} onJump={onJump} />
                 </div>
                 {renderSuggestions(t.suggestions)}
+                {renderApplied(t.applied)}
               </div>
             ))}
 

@@ -1126,6 +1126,7 @@ export default function App() {
         onClose={() => setAgentOpen(false)}
         onJump={(a) => openFunction(a)}
         onApply={applySuggestion}
+        onApplied={afterEdit}
       />
     ) : null;
 
