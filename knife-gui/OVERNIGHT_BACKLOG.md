@@ -50,7 +50,9 @@ API changes.
       sinks in the open function.
       — done: severity-colored chips (api @ addr) under the tab bar; click
       selects the site, active one highlighted.
-- [ ] Palette: search strings and symbols, not just functions.
+- [x] Palette: search strings and symbols, not just functions.
+      — done: ctrl+p now also matches string literals (2+ chars, referenced
+      ones ranked first, 40 max); picking one opens its owning function.
 - [ ] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
 - [ ] Keyboard help overlay (? key) listing every binding.
 - [x] Reachability proof inline: show the actual call chain from an entry point

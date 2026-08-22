@@ -1837,6 +1837,7 @@ export default function App() {
       {palette && (
         <Palette
           functions={functions}
+          strings={strings}
           onPick={(sel) => openFunction(sel)}
           onClose={() => setPalette(false)}
         />

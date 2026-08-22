@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FnRow } from "../api";
+import type { FnRow, StringRow } from "../api";
 
 /**
- * Quick-open: type to find a function, or paste an address to jump straight to
- * it. Reverse engineering is keyboard work — hunting a name in a list of forty
- * thousand with the mouse is the slow path.
+ * Quick-open: type to find a function or a string literal, or paste an address
+ * to jump straight to it. Reverse engineering is keyboard work — hunting a name
+ * in a list of forty thousand with the mouse is the slow path.
  *
  * Matching is subsequence-based, so `dsp` finds `DispatchDeviceControl`, and
  * results are ranked: exact, then prefix, then contiguous substring, then a
@@ -36,10 +36,13 @@ const MAX_ROWS = 200;
 
 export function Palette({
   functions,
+  strings = [],
   onPick,
   onClose,
 }: {
   functions: FnRow[];
+  /** String literals to search too; picking one opens its owning function. */
+  strings?: StringRow[];
   onPick: (selector: string) => void;
   onClose: () => void;
 }) {
@@ -69,6 +72,20 @@ export function Palette({
     return scored.slice(0, MAX_ROWS).map((x) => x.f);
   }, [functions, q]);
 
+  // Referenced literals rank above unreferenced ones — a string nothing points
+  // at is rarely what a jump was meant to find.
+  const strRows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (needle.length < 2) return [];
+    const scored: Array<{ s: StringRow; v: number }> = [];
+    for (const s of strings) {
+      const v = score(s.text.slice(0, 80), needle);
+      if (v !== null) scored.push({ s, v: v + (s.refs > 0 ? 50 : 0) });
+    }
+    scored.sort((a, b) => b.v - a.v);
+    return scored.slice(0, 40).map((x) => x.s);
+  }, [strings, q]);
+
   useEffect(() => setSel(0), [q]);
 
   // Keep the highlighted row in view as the selection moves.
@@ -83,14 +100,23 @@ export function Palette({
       onClose();
       return;
     }
-    const f = rows[asAddress ? i - 1 : i];
-    if (f) {
-      onPick(f.addr);
+    const at = asAddress ? i - 1 : i;
+    if (at < rows.length) {
+      const f = rows[at];
+      if (f) {
+        onPick(f.addr);
+        onClose();
+      }
+      return;
+    }
+    const s = strRows[at - rows.length];
+    if (s) {
+      onPick(s.addr);
       onClose();
     }
   };
 
-  const total = rows.length + (asAddress ? 1 : 0);
+  const total = rows.length + strRows.length + (asAddress ? 1 : 0);
 
   return (
     <div className="overlay" onMouseDown={onClose}>
@@ -98,7 +124,7 @@ export function Palette({
         <input
           ref={inputRef}
           className="palette-input"
-          placeholder="function name, or an address…"
+          placeholder="function, string, or address…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
@@ -138,6 +164,21 @@ export function Palette({
                 <span className="addr">{f.addr.replace("0x", "")}</span>
                 <span className={"nm" + (f.named ? " named" : "")}>{f.name}</span>
                 <span className="refs">{f.incoming}</span>
+              </div>
+            );
+          })}
+          {strRows.map((s, i) => {
+            const idx = (asAddress ? 1 : 0) + rows.length + i;
+            return (
+              <div
+                key={s.addr}
+                data-i={idx}
+                className={"palette-row" + (sel === idx ? " sel" : "")}
+                onClick={() => choose(idx)}
+              >
+                <span className="addr">{s.addr.replace("0x", "")}</span>
+                <span className={"nm" + (s.wide ? " wide" : "")}>{s.text.slice(0, 80)}</span>
+                <span className="refs">{s.refs || ""}</span>
               </div>
             );
           })}
