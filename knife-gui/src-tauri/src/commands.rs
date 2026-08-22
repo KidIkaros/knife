@@ -274,6 +274,48 @@ pub fn hex_dump(
         .map_err(|e| e.to_string())
 }
 
+/// Export the open function's CFG, or its call closure, as a Graphviz file.
+///
+/// Reports and advisories want a picture that outlives the window; .dot is the
+/// one format every graph tool reads. Returns (kind, nodes, edges) for the
+/// confirmation toast.
+#[tauri::command]
+pub fn export_dot(
+    state: State<AppState>,
+    kind: String,
+    selector: String,
+    dest: String,
+) -> Result<(String, usize, usize), String> {
+    state
+        .read(|l| {
+            let an = &l.session.an;
+            let f =
+                resolve(an, &selector).ok_or_else(|| anyhow!("nothing matches {selector:?}"))?;
+            let graph = match kind.as_str() {
+                "cfg" => graphs::cfg(f),
+                "calls" => {
+                    let mut roots = std::collections::BTreeSet::new();
+                    roots.insert(f.addr);
+                    let g = graphs::call_graph(&an.functions, &an.imports, Some(&roots));
+                    if g.nodes.len() > 96 {
+                        return Err(anyhow!(
+                            "the call closure from {} spans {} nodes; open a callee to trim it",
+                            f.name,
+                            g.nodes.len()
+                        ));
+                    }
+                    g
+                }
+                _ => return Err(anyhow!("unknown graph kind {kind:?}")),
+            };
+            let counts = (graph.nodes.len(), graph.edges.len());
+            let text = graphs::dot(&graph, &f.name);
+            std::fs::write(&dest, text).map_err(|e| anyhow!(e))?;
+            Ok((kind, counts.0, counts.1))
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Write the ranked findings to a markdown report.///
 /// The same ranked list the attack-surface pane shows, in the order it shows
 /// them (severity, then reachability), with each finding's own explanation —

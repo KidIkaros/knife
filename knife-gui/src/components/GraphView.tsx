@@ -114,9 +114,12 @@ const EDGE_COLOR: Record<string, string> = {
 export function GraphView({
   cfg,
   onOpenBlock,
+  onExport,
 }: {
   cfg: Cfg | null;
   onOpenBlock: (addr: string) => void;
+  /** Offered when set: write the graph out as Graphviz. */
+  onExport?: () => void;
 }) {
   const wrap = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
@@ -167,6 +170,11 @@ export function GraphView({
         <button onClick={fit} title="Fit">
           ⤢
         </button>
+        {onExport && (
+          <button onClick={onExport} title="Export as Graphviz (.dot)">
+            dot
+          </button>
+        )}
         <span className="zoom">{Math.round(view.k * 100)}%</span>
       </div>
 

@@ -53,7 +53,9 @@ API changes.
 - [x] Palette: search strings and symbols, not just functions.
       — done: ctrl+p now also matches string literals (2+ chars, referenced
       ones ranked first, 40 max); picking one opens its owning function.
-- [ ] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
+- [x] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
+      — done: "dot" button in the graph toolbar on both graph tabs; save dialog,
+      96-node cap on closures, toast reports nodes/edges.
 - [ ] Keyboard help overlay (? key) listing every binding.
 - [x] Reachability proof inline: show the actual call chain from an entry point
       or export to a picked finding in the evidence pane (paths_to already

@@ -320,6 +320,8 @@ export const api = {
   exportFindings: (dest: string) => invoke<number>("export_findings", { dest }),
   hexDump: (addr: string, len?: number) =>
     invoke<Array<{ label: string; hex: string; ascii: string }>>("hex_dump", { addr, len }),
+  exportDot: (kind: "cfg" | "calls", selector: string, dest: string) =>
+    invoke<[string, number, number]>("export_dot", { kind, selector, dest }),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
   bookmarksList: (path: string) => invoke<BookmarkRow[]>("bookmarks_list", { path }),

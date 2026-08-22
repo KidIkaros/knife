@@ -277,6 +277,28 @@ export default function App() {
     api.bookmarksList(opened.path).then(setMarks).catch(() => setMarks([]));
   }, [opened?.path]);
 
+  // Write the graph on screen out as Graphviz — the picture that outlives the
+  // window, for reports and advisories.
+  const exportDot = useCallback(
+    async (kind: "cfg" | "calls") => {
+      if (!current) return;
+      const dest = await saveDialog({
+        defaultPath: `${curName || "graph"}-${kind}.dot`,
+        filters: [{ name: "Graphviz", extensions: ["dot", "gv"] }],
+      });
+      if (!dest) return;
+      try {
+        const [, nodes, edges] = await api.exportDot(kind, current, dest);
+        setError(
+          `wrote ${nodes} node${nodes === 1 ? "" : "s"}, ${edges} edge${edges === 1 ? "" : "s"} to ${dest}`,
+        );
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [current, curName],
+  );
+
   /// Remember the target and function so the next launch resumes here.
   const remember = useCallback((path: string, at: string | null) => {    try {
       localStorage.setItem("knife.last", JSON.stringify({ path, at }));
@@ -1604,7 +1626,11 @@ export default function App() {
               )}
 
               {tab === "graph" ? (
-                <GraphView cfg={cfg} onOpenBlock={(a) => { setTab("disasm"); setSelected(a); }} />
+                <GraphView
+                  cfg={cfg}
+                  onOpenBlock={(a) => { setTab("disasm"); setSelected(a); }}
+                  onExport={current ? () => void exportDot("cfg") : undefined}
+                />
               ) : tab === "calls" ? (
                 <GraphView
                   cfg={cgraph}
@@ -1613,6 +1639,7 @@ export default function App() {
                     // code, pseudocode, and closure are one step away.
                     void openFunction(a);
                   }}
+                  onExport={current ? () => void exportDot("calls") : undefined}
                 />
               ) : tab === "pseudo" && ir.length === 0 && pseudoLoading ? (
                 <div className="code decompiling">decompiling…</div>

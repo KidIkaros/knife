@@ -60,6 +60,7 @@ fn main() {
             agent::agent_cancel,
             commands::cfg,
             commands::call_graph,
+            commands::export_dot,
             commands::strings_list,
             console::console_exec,
             symbols::imports,
