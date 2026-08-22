@@ -232,6 +232,12 @@ export default function App() {
     return m;
   }, [findings, curName]);
 
+  // The sinks in the open function, in ranked order — the strip above the code.
+  const curFindings = useMemo(
+    () => findings.filter((f) => f.func === curName),
+    [findings, curName],
+  );
+
   const primAt = useMemo(() => {
     const m = new Map<string, { api: string; severity: number }>();
     for (const p of driverFull?.primitives ?? []) {
@@ -1575,6 +1581,25 @@ export default function App() {
                   <span className="fclose" onClick={() => setFind(null)}>
                     ✕
                   </span>
+                </div>
+              )}
+
+              {curFindings.length > 0 && (
+                <div className="fstrip" title="the ranked sinks in this function">
+                  {curFindings.map((f) => (
+                    <span
+                      key={f.addr + f.pattern}
+                      className={"fchip sev s" + Math.min(f.severity, 3) + (selected === f.addr ? " on" : "")}
+                      title={`${f.pattern.replace(/-/g, " ")} — ${f.detail}`}
+                      onClick={() => {
+                        if (tab === "graph" || tab === "calls") setTab("disasm");
+                        setSelected(f.addr);
+                      }}
+                    >
+                      <i>{f.severity >= 3 ? "H" : f.severity >= 2 ? "M" : "L"}</i>
+                      {f.api} @ {f.addr.replace("0x", "")}
+                    </span>
+                  ))}
                 </div>
               )}
 

@@ -46,8 +46,10 @@ API changes.
       classic LPE pattern).
       — done: the code renders in critical red with a "raw buffer" tag and a
       tooltip explaining what METHOD_NEITHER hands the driver.
-- [ ] Findings-in-function strip above the code view: one-click walk of the
+- [x] Findings-in-function strip above the code view: one-click walk of the
       sinks in the open function.
+      — done: severity-colored chips (api @ addr) under the tab bar; click
+      selects the site, active one highlighted.
 - [ ] Palette: search strings and symbols, not just functions.
 - [ ] Export the CFG or call closure as a Graphviz .dot file (graphs::dot).
 - [ ] Keyboard help overlay (? key) listing every binding.

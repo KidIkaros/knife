@@ -651,6 +651,49 @@ body {
   color: var(--muted);
 }
 
+/* the ranked-sinks strip above the code view */
+.fstrip {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 10.5px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.fchip i {
+  font-style: normal;
+  font-weight: 700;
+}
+
+.fchip.sev.s3,
+.fchip.sev.s3 i {
+  color: var(--critical);
+}
+
+.fchip.sev.s2,
+.fchip.sev.s2 i {
+  color: var(--amber);
+}
+
+.fchip.on {
+  border-color: var(--accent);
+  background: #2a1e20;
+}
+
 .finding .pat {
   color: var(--text);
 }
