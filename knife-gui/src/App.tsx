@@ -456,6 +456,15 @@ export default function App() {
 
   useEffect(() => saveNum("knife.leftW", leftW), [leftW]);
   useEffect(() => saveNum("knife.rightW", rightW), [rightW]);
+  // The center tab rides with the session, so a restart lands you back in
+  // pseudocode (or the graphs) instead of always restarting in disassembly.
+  useEffect(() => {
+    try {
+      localStorage.setItem("knife.tab", tab);
+    } catch {
+      /* persistence is a convenience */
+    }
+  }, [tab]);
   useEffect(() => saveNum("knife.leftOpen", leftOpen ? 1 : 0), [leftOpen]);
   useEffect(() => saveNum("knife.rightOpen", rightOpen ? 1 : 0), [rightOpen]);
   useEffect(() => saveNum("knife.agentW", agentW), [agentW]);
@@ -489,11 +498,18 @@ export default function App() {
     if (restored) return;
     setRestored(true);
     let last: { path: string; at: string | null } | null = null;
+    let lastTab: Tab | null = null;
     try {
       const raw = localStorage.getItem("knife.last");
       last = raw ? JSON.parse(raw) : null;
     } catch {
       last = null;
+    }
+    try {
+      const t = localStorage.getItem("knife.tab");
+      if (t === "disasm" || t === "pseudo" || t === "graph" || t === "calls") lastTab = t;
+    } catch {
+      lastTab = null;
     }
     if (!last?.path) return;
     (async () => {
@@ -505,6 +521,7 @@ export default function App() {
         const fns = await loadViews();
         setTargets(await api.listTargets());
         const at = last.at ?? fns[0]?.addr;
+        if (lastTab) setTab(lastTab);
         if (at) void openFunction(at, false);
       } catch {
         // The file may have moved or been deleted since; starting at the

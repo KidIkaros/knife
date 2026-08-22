@@ -58,7 +58,9 @@ API changes.
       — done: clicking a string's ref count opens its function and pins the
       xref pane to the literal (@ addr shown in the pane head); any navigation
       unpins. Row click still jumps as before.
-- [ ] Remember the last-used graph/calls tab per session restore.
+- [x] Remember the last-used graph/calls tab per session restore.
+      — done: knife.tab persisted on change and restored when the last target
+      reopens; lazy fetches (pseudocode, call closure) fire as usual.
 
 ## Notes
 - Gates: cd knife-gui && npx tsc --noEmit; cd .. && cargo build -p knife-gui;
