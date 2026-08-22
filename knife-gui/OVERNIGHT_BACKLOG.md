@@ -6,9 +6,12 @@ commit locally (do not push). Reuse existing backend data; avoid risky reknife
 API changes.
 
 ## Queue (top = next)
-- [ ] Persist the left-pane view and severity filter with the session restore.
+(none — append new items below)
 
 ## Done
+- [x] Persist the left-pane view and severity filter with the session restore.
+      — done: knife.leftView / knife.sev saved on change, validated and applied
+      when the last target reopens (alongside knife.tab).
 - [x] Xref pane: clicking a caller row selects the exact call site in the listing,
       not just its containing function.
       — done: onJump awaits openFunction then setSelected(site); callee/entry

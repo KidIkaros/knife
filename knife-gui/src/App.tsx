@@ -532,6 +532,22 @@ export default function App() {
       /* persistence is a convenience */
     }
   }, [tab]);
+  // The left pane and the severity filter ride along too: an analyst mid-driver
+  // audit should reopen inside the driver view, filtered as they left it.
+  useEffect(() => {
+    try {
+      localStorage.setItem("knife.leftView", leftView);
+    } catch {
+      /* persistence is a convenience */
+    }
+  }, [leftView]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("knife.sev", sevFilter === null ? "" : String(sevFilter));
+    } catch {
+      /* persistence is a convenience */
+    }
+  }, [sevFilter]);
   useEffect(() => saveNum("knife.leftOpen", leftOpen ? 1 : 0), [leftOpen]);
   useEffect(() => saveNum("knife.rightOpen", rightOpen ? 1 : 0), [rightOpen]);
   useEffect(() => saveNum("knife.agentW", agentW), [agentW]);
@@ -578,6 +594,24 @@ export default function App() {
     } catch {
       lastTab = null;
     }
+    let lastView: LeftView | null = null;
+    try {
+      const v = localStorage.getItem("knife.leftView");
+      if (
+        v === "functions" || v === "attack" || v === "strings" || v === "imports" ||
+        v === "exports" || v === "facts" || v === "patches" || v === "driver"
+      )
+        lastView = v;
+    } catch {
+      lastView = null;
+    }
+    let lastSev: 1 | 2 | 3 | null = null;
+    try {
+      const s = localStorage.getItem("knife.sev");
+      if (s === "1" || s === "2" || s === "3") lastSev = Number(s) as 1 | 2 | 3;
+    } catch {
+      lastSev = null;
+    }
     if (!last?.path) return;
     (async () => {
       setBusy(true);
@@ -589,6 +623,8 @@ export default function App() {
         setTargets(await api.listTargets());
         const at = last.at ?? fns[0]?.addr;
         if (lastTab) setTab(lastTab);
+        if (lastView) setLeftView(lastView);
+        if (lastSev) setSevFilter(lastSev);
         if (at) void openFunction(at, false);
       } catch {
         // The file may have moved or been deleted since; starting at the
