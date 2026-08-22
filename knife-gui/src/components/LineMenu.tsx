@@ -75,6 +75,7 @@ export function pseudoMenu(
     renameVar: (base: string) => void;
     setPrototype: () => void;
   },
+  ctx?: { addr?: string | null; func: string; copy: (text: string) => void },
 ): MenuItem[] {
   const items: MenuItem[] = [];
   const field = actions?.field ?? null;
@@ -104,5 +105,11 @@ export function pseudoMenu(
     });
   }
   items.push({ label: "Set prototype", hint: "p", run: handlers.setPrototype });
+  // What every RE tool should hand the clipboard: where you are, and what the
+  // thing under the cursor is called.
+  if (ctx?.addr)
+    items.push({ label: `Copy ${ctx.addr}`, hint: "y", run: () => ctx.copy(ctx.addr!) });
+  if (ctx?.func)
+    items.push({ label: `Copy ${ctx.func}`, hint: "Y", run: () => ctx.copy(ctx.func) });
   return items;
 }

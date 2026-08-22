@@ -730,6 +730,22 @@ export default function App() {
             setNoting(true);
           }
           break;
+        case "y": {
+          // Copy where you are: the selected instruction if one is, else the
+          // function address.
+          const text = selected ?? current;
+          if (!text) break;
+          e.preventDefault();
+          void navigator.clipboard.writeText(text);
+          setError(`copied ${text}`);
+          break;
+        }
+        case "Y":
+          if (!curName) break;
+          e.preventDefault();
+          void navigator.clipboard.writeText(curName);
+          setError(`copied ${curName}`);
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1429,7 +1445,17 @@ export default function App() {
                     setLeftOpen(true);
                   }}
                   onLineMenu={(i, at) =>
-                    setMenu({ at, items: pseudoMenu(acts[i], editHandlers) })
+                    setMenu({
+                      at,
+                      items: pseudoMenu(acts[i], editHandlers, {
+                        addr: selected ?? current,
+                        func: curName,
+                        copy: (text) => {
+                          void navigator.clipboard.writeText(text);
+                          setError(`copied ${text}`);
+                        },
+                      }),
+                    })
                   }
                 />
               )}
@@ -1551,7 +1577,7 @@ export default function App() {
           })()}
           <div className="spacer" />
           <span className="sb-keys">
-            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
+            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
           </span>
         </div>
       )}
