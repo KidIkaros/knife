@@ -1524,6 +1524,18 @@ export default function App() {
       {opened && (
         <div className="statusbar">
           <span className="sb-fn">{curName || "—"}</span>
+          {pickedFinding &&
+            (() => {
+              const i = findings.findIndex(
+                (f) =>
+                  f.addr === pickedFinding.addr && f.pattern === pickedFinding.pattern,
+              );
+              return i >= 0 ? (
+                <span className="sb-finding">
+                  ⚑ {i + 1}/{findings.length}
+                </span>
+              ) : null;
+            })()}
           {(() => {
             const f = functions.find((x) => x.addr === current);
             return f ? (
