@@ -1758,7 +1758,7 @@ export default function App() {
                   </div>
                 )}
               </div>
-              {detail && <DetailPanel d={detail} />}
+              {detail && <DetailPanel d={detail} driver={driverFull} />}
             </div>
             )}
             {agentOpen && agentDock === "right" && (

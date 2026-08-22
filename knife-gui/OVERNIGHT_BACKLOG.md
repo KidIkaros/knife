@@ -42,6 +42,16 @@ API changes.
       16-byte rows with an ascii gutter; ‹ › page by 64 bytes, Esc closes.
 
 ## New items
+- [x] Driver summary in the detail panel: devices, IRP handlers, IOCTL count
+      (METHOD_NEITHER flagged), reachable critical primitives — from the report
+      already fetched at open.
+      — done: a "Kernel surface" section with entry/devices/irp/ioctls/
+      primitives; the head badge calls out raw-buffer ioctls and reachable
+      criticals in red, "no critical surface" otherwise.
+- [ ] Filter box for the strings list (backend filter exists).
+- [ ] Evidence pane: copy the proof chain as text for report writing.
+- [ ] Alt-click a chip in the findings strip to open its evidence.
+- [ ] Recent targets on the welcome screen (list_targets).
 - [x] METHOD_NEITHER IOCTLs flagged in the driver view (raw user buffer —
       classic LPE pattern).
       — done: the code renders in critical red with a "raw buffer" tag and a

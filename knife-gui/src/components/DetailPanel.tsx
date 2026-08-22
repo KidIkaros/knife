@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { BinaryDetail } from "../api";
+import type { BinaryDetail, DriverReport } from "../api";
 import { Section } from "./Section";
 
 function KV({ k, v }: { k: string; v: ReactNode }) {
@@ -38,7 +38,7 @@ function EntropyBar({ v }: { v: number }) {
   );
 }
 
-export function DetailPanel({ d }: { d: BinaryDetail }) {
+export function DetailPanel({ d, driver }: { d: BinaryDetail; driver?: DriverReport | null }) {
   return (
     <div>
       <Section title="Binary" storageKey="binary">
@@ -97,6 +97,48 @@ export function DetailPanel({ d }: { d: BinaryDetail }) {
               <span className="v">{c.apis.length}</span>
             </div>
           ))}
+        </Section>
+      )}
+
+      {driver && (
+        <Section
+          title="Kernel surface"
+          storageKey="kernel"
+          right={
+            (() => {
+              const neither = driver.ioctls.filter((c) => c.method === "METHOD_NEITHER").length;
+              const crit = driver.primitives.filter((p) => p.severity >= 3 && p.reachable).length;
+              return neither > 0 || crit > 0 ? (
+                <span className="sr-bad">
+                  {[neither > 0 ? `${neither} raw-buffer ioctl${neither === 1 ? "" : "s"}` : "",
+                    crit > 0 ? `${crit} reachable critical${crit === 1 ? "" : "s"}` : ""]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              ) : (
+                <span className="sr-dim">no critical surface</span>
+              );
+            })()
+          }
+        >
+          <KV k="entry" v={`${driver.entry_name || "entry"} · ${driver.entry.replace("0x", "")}`} />
+          <KV
+            k="devices"
+            v={`${driver.devices.length}, ${driver.devices.filter((x) => x.created).length} created`}
+          />
+          <KV k="irp handlers" v={String(driver.irp.length)} />
+          <KV
+            k="ioctls"
+            v={`${driver.ioctls.length}${
+              driver.ioctls.some((c) => c.method === "METHOD_NEITHER") ? " · raw-buffer present" : ""
+            }`}
+          />
+          <KV
+            k="primitives"
+            v={`${driver.primitives.length}, ${
+              driver.primitives.filter((p) => p.reachable).length
+            } user-reachable`}
+          />
         </Section>
       )}
 
