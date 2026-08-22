@@ -1055,6 +1055,11 @@ export default function App() {
             onClick={() => pickLeft("attack")}
           >
             <IconAttack />
+            {findings.length > 0 && (
+              <span className="count">
+                {findings.length > 99 ? "99+" : findings.length}
+              </span>
+            )}
           </button>
           <button
             className={leftView === "strings" ? "active" : ""}

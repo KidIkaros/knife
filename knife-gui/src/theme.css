@@ -118,6 +118,23 @@ body {
   cursor: pointer;
   display: grid;
   place-items: center;
+  position: relative;
+}
+
+/* finding count on the attack-surface icon */
+.rail button .count {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  min-width: 13px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #f5eeee;
+  font-size: 9px;
+  line-height: 13px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .rail button:hover {
