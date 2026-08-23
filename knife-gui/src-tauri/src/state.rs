@@ -144,26 +144,28 @@ impl AppState {
             .open
             .get_mut(active)
             .ok_or_else(|| anyhow!("no target is open"))?;
-        let matched = catch_unwind(AssertUnwindSafe(|| -> Result<usize> {
-            match rules {
+        // As in `edit`: the rebuild that follows the scan runs the audit and the
+        // detail panel over hostile bytes, so it goes inside the barrier rather
+        // than after it, where a panic would poison the lock held here.
+        on_big_stack(move || {
+            let matched = match rules {
                 Some(path) => {
                     let (compiled, _) = reknife::analysis::yara::compile(path)?;
                     let hits = reknife::analysis::yara::scan(&compiled, &loaded.session.bytes)?;
                     let n = hits.len();
                     loaded.yara = hits;
                     loaded.yara_rules = Some(path.to_string());
-                    Ok(n)
+                    n
                 }
                 None => {
                     loaded.yara.clear();
                     loaded.yara_rules = None;
-                    Ok(0)
+                    0
                 }
-            }
-        }))
-        .map_err(|_| anyhow!("the rule scan panicked"))??;
-        recompute_derived(loaded);
-        Ok(matched)
+            };
+            recompute_derived(loaded);
+            Ok(matched)
+        })
     }
 
     /// Show an already-open target.
@@ -247,28 +249,34 @@ impl AppState {
     /// Persist an analyst fact that changes recovery (a name), then rebuild the
     /// analysis and the name-dependent caches — the GUI equivalent of the TUI's
     /// `refresh_analysis`. Uses `ANALYSIS_BUDGET` so the on-disk cache stays valid.
-    pub fn edit<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
+    pub fn edit<T: Send>(&self, f: impl FnOnce(&mut Session) -> Result<T> + Send) -> Result<T> {
         let mut guard = self.inner.lock().unwrap();
         let active = guard.active;
         let loaded = guard
             .open
             .get_mut(active)
             .ok_or_else(|| anyhow!("no target is open"))?;
-        let out = catch_unwind(AssertUnwindSafe(|| {
+        // The re-analysis belongs inside the barrier, not after it. It runs the
+        // same hostile-input engine as `open`, and it used to run bare: a panic
+        // in `engine::analyze` or `audit::run` unwound through the `MutexGuard`
+        // this function is holding, poisoning it, and every later `lock().unwrap()`
+        // in this file panicked — one bad rename killed the window for the rest of
+        // the session. Running it on the analysis thread keeps the unwind over
+        // there, so a panic comes back as an `Err` and the lock survives; the
+        // large stack is the same insurance the read path already takes.
+        on_big_stack(move || {
             let out = f(&mut loaded.session)?;
             loaded.session.db.save()?;
-            Ok::<T, anyhow::Error>(out)
-        }))
-        .map_err(|_| anyhow!("the edit panicked"))??;
-        let an = engine::analyze(
-            &loaded.session.bin,
-            &loaded.session.bytes,
-            ANALYSIS_BUDGET,
-            &loaded.session.db,
-        );
-        loaded.session.an = an;
-        recompute_derived(loaded);
-        Ok(out)
+            let an = engine::analyze(
+                &loaded.session.bin,
+                &loaded.session.bytes,
+                ANALYSIS_BUDGET,
+                &loaded.session.db,
+            );
+            loaded.session.an = an;
+            recompute_derived(loaded);
+            Ok(out)
+        })
     }
 }
 
