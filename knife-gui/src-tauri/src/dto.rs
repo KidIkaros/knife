@@ -166,6 +166,10 @@ pub struct FindingDto {
     /// Where the dangerous value came from, named from the audit's own
     /// explanation: `SUBTRACTION`, `EXTERNAL INPUT`, `ARGUMENT`, and so on.
     pub source: &'static str,
+    /// The instructions the argument came through, so the listing can highlight
+    /// the flow rather than only marking its destination. Ascending; a step can
+    /// sit after the call when a loop's back edge feeds it.
+    pub trail: Vec<String>,
 }
 
 /// Name the provenance the audit found, from the sentence it wrote about it.
@@ -202,6 +206,7 @@ impl From<&audit::Finding> for FindingDto {
             detail: f.detail.clone(),
             reachable: f.reachable,
             source: evidence_source(&f.detail),
+            trail: f.trail.iter().copied().map(hex).collect(),
         }
     }
 }

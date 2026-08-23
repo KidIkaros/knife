@@ -79,9 +79,19 @@ export function Evidence({
 
       <div className="erow">
         <span className="ekey">signal</span>
-        <span className="echain">
+        <span
+          className={"echain" + (finding.trail.length ? " walkable" : "")}
+          title={
+            finding.trail.length
+              ? `${finding.trail.length} instructions carry it — click to walk to the first, they are marked in the listing`
+              : undefined
+          }
+          onClick={() => finding.trail.length && onJump(finding.trail[0])}
+        >
           <b>{finding.source}</b>
-          <i>{"→"}</i>DATA FLOW<i>{"→"}</i>
+          <i>{"→"}</i>
+          {finding.trail.length ? `${finding.trail.length} STEPS` : "DATA FLOW"}
+          <i>{"→"}</i>
           <b>{finding.api.toUpperCase()}</b>
         </span>
         {finding.func && (

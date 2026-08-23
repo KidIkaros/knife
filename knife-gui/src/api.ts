@@ -60,6 +60,9 @@ export interface Finding {
   detail: string;
   reachable: boolean;
   source: string;
+  /// The instructions the dangerous argument came through, ascending. A step can
+  /// sit after the call when a loop's back edge feeds it.
+  trail: string[];
 }
 
 export interface Section {

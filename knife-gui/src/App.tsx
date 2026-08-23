@@ -301,6 +301,22 @@ export default function App() {
     [findings, curName],
   );
 
+  // The picked finding's data flow, keyed by address so the listing can mark it.
+  // Only the picked one: several overlapping trails would be noise rather than
+  // an explanation.
+  //
+  // Steps are not ranked into origin-and-hops. The audit unions its walk across
+  // branch joins, so what it knows is which instructions participate, not which
+  // came first — and with a loop back edge the lowest address is not the origin.
+  // Marking them all as steps says exactly what is true.
+  const trailAt = useMemo(() => {
+    const m = new Map<string, "step" | "sink">();
+    if (!pickedFinding || pickedFinding.func !== curName) return m;
+    for (const a of pickedFinding.trail) m.set(a, "step");
+    m.set(pickedFinding.addr, "sink");
+    return m;
+  }, [pickedFinding, curName]);
+
   const primAt = useMemo(() => {
     const m = new Map<string, { api: string; severity: number }>();
     for (const p of driverFull?.primitives ?? []) {
@@ -1981,6 +1997,7 @@ export default function App() {
                   currentHit={hits.length ? hits[hit % hits.length] : null}
                   findingAt={findingAt}
                   primAt={primAt}
+                  trailAt={trailAt}
                   onSelect={setSelected}
                   onSelectIr={setIrSel}
                   onFollow={(sel) => openFunction(sel)}

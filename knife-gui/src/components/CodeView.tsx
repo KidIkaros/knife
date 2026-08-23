@@ -13,6 +13,7 @@ export function CodeView({
   currentHit,
   findingAt,
   primAt,
+  trailAt,
   onSelect,
   onSelectIr,
   onFollow,
@@ -35,6 +36,11 @@ export function CodeView({
   /// A finding takes precedence, so this only marks primitives the audit did not
   /// already flag: MmMapIoSpace, __readmsr, token swaps and friends.
   primAt: Map<string, { api: string; severity: number }>;
+  /// The picked finding's data flow: the instructions its dangerous argument
+  /// came through, and the call it reaches. Marking these is what turns the
+  /// audit's sentence about provenance into something you can read off the
+  /// listing.
+  trailAt: Map<string, "step" | "sink">;
   onSelect: (addr: string) => void;
   onSelectIr: (index: number) => void;
   onFollow: (selector: string) => void;
@@ -96,6 +102,7 @@ export function CodeView({
         }
         const finding = findingAt.get(l.addr);
         const prim = finding ? undefined : primAt.get(l.addr);
+        const flow = trailAt.get(l.addr);
         return (
           <div
             key={i}
@@ -105,12 +112,27 @@ export function CodeView({
               (l.addr === selected ? " sel" : "") +
               hitClass(i) +
               (finding ? " danger s" + Math.min(finding.severity, 3) : "") +
-              (prim ? " kprim" : "")
+              (prim ? " kprim" : "") +
+              (flow ? " taint " + flow : "")
             }
             onClick={() => onSelect(l.addr)}
             onDoubleClick={() => l.target && onFollow(l.target)}
           >
-            <span className="gutter">{l.addr.replace("0x", "")}</span>
+            <span className="gutter">
+              {flow && (
+                <i
+                  className="flowmark"
+                  title={
+                    flow === "sink"
+                      ? "the dangerous call this data reaches"
+                      : "the tainted argument passes through here"
+                  }
+                >
+                  {flow === "sink" ? "▼" : "│"}
+                </i>
+              )}
+              {l.addr.replace("0x", "")}
+            </span>
             <span className="mnem">{l.mnemonic}</span>
             {l.target ? (
               <span className="ops">

@@ -252,6 +252,38 @@ body {
   background: var(--critical);
 }
 
+/* ── taint trail ──────────────────────────────────────────────────────────
+   The picked finding's data flow, marked on the listing: every instruction the
+   dangerous argument came through, and the call it reaches. Tinted rather than
+   coloured, so it reads underneath the danger and selection marks instead of
+   fighting them. */
+.code .ln.taint {
+  background: rgba(61, 255, 171, 0.07);
+  box-shadow: inset 2px 0 0 var(--mint);
+}
+
+.code .ln.taint.sink {
+  background: rgba(255, 91, 96, 0.1);
+  box-shadow: inset 2px 0 0 var(--critical);
+}
+
+/* The selection still wins: it is where the cursor is. */
+.code .ln.taint.sel {
+  background: var(--sel-bg);
+}
+
+.code .ln .flowmark {
+  display: inline-block;
+  width: 10px;
+  margin-left: -10px;
+  font-style: normal;
+  color: var(--mint);
+}
+
+.code .ln.taint.sink .flowmark {
+  color: var(--critical);
+}
+
 /* ── navigator band ───────────────────────────────────────────────────── */
 .navband {
   position: relative;
@@ -2150,6 +2182,15 @@ body {
 
 .echain b {
   font-weight: 700;
+}
+
+/* The signal reads as a claim until the steps behind it can be walked. */
+.echain.walkable {
+  cursor: pointer;
+}
+
+.echain.walkable:hover {
+  text-decoration: underline dotted;
 }
 
 .echain i {
