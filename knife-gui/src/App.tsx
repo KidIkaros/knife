@@ -73,6 +73,25 @@ type LeftView =
 
 const FN_LIMIT = 20000;
 
+/**
+ * Reconstruct clean, columnar text from a listing so it copies as readable
+ * source. The on-screen columns (address / mnemonic / operands) are laid out
+ * with flexbox `gap`, which contributes no characters — a raw selection copy
+ * would run them together as `1400010a0movrax, rbx`. Here we rebuild each line
+ * with real separators so pasted disassembly and pseudocode stay aligned.
+ */
+function listingToText(tab: Tab, lines: Line[], ir: IrLine[]): string {
+  if (tab === "pseudo") return ir.map((l) => l.text).join("\n");
+  return lines
+    .map((l) => {
+      if (l.kind === "label") return l.text;
+      if (l.kind === "data") return `${l.addr}  ${l.text}`;
+      const body = l.operands ? `${l.mnemonic.padEnd(7)} ${l.operands}` : l.mnemonic;
+      return `${l.addr}  ${body}${l.annot ? `  ; ${l.annot.text}` : ""}`;
+    })
+    .join("\n");
+}
+
 /** Read a persisted number, tolerating a cleared or unreadable store. */
 function loadNum(key: string, fallback: number): number {
   try {
@@ -969,6 +988,23 @@ export default function App() {
           void navigator.clipboard.writeText(curName);
           setError(`copied ${curName}`);
           break;
+        case "C": {
+          // Copy the whole listing, or the current text selection if there is
+          // one. Only meaningful on the code tabs; graph/criticals have nothing
+          // line-shaped to copy.
+          if (tab !== "disasm" && tab !== "pseudo") break;
+          e.preventDefault();
+          const sel = window.getSelection()?.toString();
+          const text = sel && sel.trim() ? sel : listingToText(tab, lines, ir);
+          if (!text.trim()) break;
+          void navigator.clipboard.writeText(text);
+          setError(
+            sel && sel.trim()
+              ? `copied selection (${text.split("\n").length} lines)`
+              : `copied ${tab === "pseudo" ? "pseudocode" : "disassembly"} (${text.split("\n").length} lines)`,
+          );
+          break;
+        }
         case "b":
           e.preventDefault();
           jumpMark(1);
@@ -1809,6 +1845,28 @@ export default function App() {
                     }}
                   >
                     note
+                  </button>
+                  <button
+                    className="act"
+                    title="copy the listing (or the current selection) — C"
+                    disabled={
+                      (tab !== "disasm" && tab !== "pseudo") ||
+                      (tab === "disasm" ? lines.length === 0 : ir.length === 0)
+                    }
+                    onClick={() => {
+                      if (tab !== "disasm" && tab !== "pseudo") return;
+                      const sel = window.getSelection()?.toString();
+                      const text = sel && sel.trim() ? sel : listingToText(tab, lines, ir);
+                      if (!text.trim()) return;
+                      void navigator.clipboard.writeText(text);
+                      setError(
+                        sel && sel.trim()
+                          ? `copied selection (${text.split("\n").length} lines)`
+                          : `copied ${tab === "pseudo" ? "pseudocode" : "disassembly"} (${text.split("\n").length} lines)`,
+                      );
+                    }}
+                  >
+                    copy
                   </button>
                 </div>
               </div>

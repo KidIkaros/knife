@@ -657,6 +657,10 @@ body {
   overflow: auto;
   min-height: 0;
   padding: 6px 0;
+  /* The listing is code — let it be selected and copied natively. The `copy`
+     button (and the C shortcut) rebuild clean columns; a raw drag-selection is
+     the escape hatch for grabbing an arbitrary span. */
+  user-select: text;
 }
 
 .code .ln {
@@ -914,6 +918,18 @@ body {
 .kv .v {
   color: var(--text);
   word-break: break-all;
+}
+
+/* A copyable value (hashes): click to copy, and drag-select if preferred. */
+.kv .v.copyable {
+  cursor: pointer;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.kv .v.copyable:hover {
+  color: var(--accent-hi);
+  text-decoration: underline dotted;
 }
 
 .verdict {
@@ -3154,7 +3170,9 @@ body {
 }
 
 /* criticals tab badge */
-.crit-tab {
+/* Specific enough to beat `.tabs .tab { display: grid }`, which would otherwise
+   stack the count badge onto a second row below the label. */
+.tabs .tab.crit-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;

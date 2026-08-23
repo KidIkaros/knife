@@ -1,8 +1,30 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { BinaryDetail, DriverReport } from "../api";
 import { Section } from "./Section";
 
-function KV({ k, v }: { k: string; v: ReactNode }) {
+// A key/value row. Pass `copy` to make the value a one-click copy (a hash, say),
+// with a brief "copied" confirmation; such a value is also drag-selectable.
+function KV({ k, v, copy }: { k: string; v: ReactNode; copy?: string }) {
+  const [done, setDone] = useState(false);
+  if (copy) {
+    return (
+      <div className="kv">
+        <span className="k">{k}</span>
+        <span
+          className="v copyable"
+          title="click to copy"
+          onClick={() => {
+            void navigator.clipboard.writeText(copy).then(() => {
+              setDone(true);
+              setTimeout(() => setDone(false), 1000);
+            });
+          }}
+        >
+          {done ? "copied ✓" : v}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="kv">
       <span className="k">{k}</span>
@@ -143,10 +165,10 @@ export function DetailPanel({ d, driver }: { d: BinaryDetail; driver?: DriverRep
       )}
 
       <Section title="Hashes" storageKey="hashes" defaultOpen={false}>
-        <KV k="sha256" v={d.hashes.sha256} />
-        <KV k="sha1" v={d.hashes.sha1} />
-        <KV k="md5" v={d.hashes.md5} />
-        {d.hashes.imphash && <KV k="imphash" v={d.hashes.imphash} />}
+        <KV k="sha256" v={d.hashes.sha256} copy={d.hashes.sha256} />
+        <KV k="sha1" v={d.hashes.sha1} copy={d.hashes.sha1} />
+        <KV k="md5" v={d.hashes.md5} copy={d.hashes.md5} />
+        {d.hashes.imphash && <KV k="imphash" v={d.hashes.imphash} copy={d.hashes.imphash} />}
       </Section>
 
       <Section

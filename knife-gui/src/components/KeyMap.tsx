@@ -35,6 +35,7 @@ const GROUPS: Array<[string, Array<[string, string]>]> = [
       ["m", "bookmark the selection"],
       ["b / B", "next / previous bookmark"],
       ["y / Y", "copy address / function name"],
+      ["C", "copy the listing (or selection)"],
       ["n", "rename the function"],
       ["c", "note on the selection"],
       ["P", "stage patch bytes at the selection"],
