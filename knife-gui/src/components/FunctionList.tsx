@@ -8,12 +8,15 @@ export function FunctionList({
   rows,
   current,
   risk,
+  filter,
   onPick,
 }: {
   rows: FnRow[];
   current: string | null;
   /// Function name -> highest finding severity it contains (3/2/1).
   risk: Map<string, number>;
+  /// The query behind `rows`, so an empty result can say what did not match.
+  filter?: string;
   onPick: (addr: string) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -23,6 +26,20 @@ export function FunctionList({
     estimateSize: () => 22,
     overscan: 24,
   });
+
+  // A filter that matches nothing used to leave the pane blank, which reads as a
+  // broken window rather than an answer.
+  if (!rows.length) {
+    return (
+      <div className="list">
+        <div className="empty-hint">
+          {filter ? `no function matches "${filter}"` : "no functions recovered"}
+          <br />
+          <span>{filter ? "clear the filter to see them all" : "the image may be data only"}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="list" ref={parentRef}>

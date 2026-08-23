@@ -23,6 +23,18 @@ export function StringsList({
     overscan: 20,
   });
 
+  if (!rows.length) {
+    return (
+      <div className="list">
+        <div className="empty-hint">
+          no literal matches
+          <br />
+          <span>clear the filter to see every string</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="list" ref={parentRef}>
       <div style={{ height: v.getTotalSize(), position: "relative" }}>

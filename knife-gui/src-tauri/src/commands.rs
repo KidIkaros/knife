@@ -472,16 +472,18 @@ pub fn set_name(state: State<AppState>, addr: String, name: String) -> Result<()
 pub fn set_note(state: State<AppState>, addr: String, note: String) -> Result<(), String> {
     let at = parse_addr(&addr).map_err(|e| e.to_string())?;
     let note = note.trim().to_string();
-    if note.is_empty() {
-        // Clearing a note without disturbing the name needs a dedicated reknife
-        // method that does not exist yet; offer that in a later pass rather than
-        // silently dropping the name too (which `Db::clear` would do).
-        return Err("an empty note is not supported yet".to_string());
-    }
     state
         .annotate(|s| {
             let base = engine::display_base(&s.bin);
-            s.db.set_note(at.wrapping_sub(base), &note);
+            let at = at.wrapping_sub(base);
+            // Saving an empty note is how you delete one. This used to be
+            // refused, for want of a way to drop the note without dropping the
+            // name beside it — `Db::clear_note` does exactly that.
+            if note.is_empty() {
+                s.db.clear_note(at);
+            } else {
+                s.db.set_note(at, &note);
+            }
             Ok(())
         })
         .map_err(|e| e.to_string())

@@ -1002,7 +1002,7 @@ mod tests {
         db.set_note(0x1400, "length is attacker controlled");
 
         assert_eq!(db.clear_name(0x1400).as_deref(), Some("parse_header"));
-        assert!(db.names.get(&0x1400).is_none());
+        assert!(!db.names.contains_key(&0x1400));
         assert_eq!(
             db.notes.get(&0x1400).map(String::as_str),
             Some("length is attacker controlled"),
@@ -1013,7 +1013,7 @@ mod tests {
             db.clear_note(0x1400).as_deref(),
             Some("length is attacker controlled")
         );
-        assert!(db.notes.get(&0x1400).is_none());
+        assert!(!db.notes.contains_key(&0x1400));
         assert!(db.is_empty());
     }
 

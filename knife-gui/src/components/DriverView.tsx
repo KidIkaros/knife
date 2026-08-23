@@ -10,6 +10,7 @@ import type { DriverReport } from "../api";
  */
 export function DriverView({
   report,
+  isDriver,
   reachableOnly,
   criticalOnly,
   ioctlsByHandler,
@@ -25,16 +26,25 @@ export function DriverView({
   ioctlsByHandler?: Map<string, Array<{ code: string; addr: string; method: string }>>;
   onToggleReachable: () => void;
   onToggleCritical: () => void;
+  /** Whether the open image is a driver at all, known before the report lands. */
+  isDriver?: boolean;
   onJump: (addr: string) => void;
   onPseudo: (addr: string) => void;
 }) {
   if (!report) {
+    // "Not a driver" was shown for the whole time the report was being built,
+    // so opening a real driver asserted the opposite of the truth for a beat.
+    // The image already told us which of the two this is.
     return (
       <div className="list">
         <div className="empty-hint">
-          not a driver
+          {isDriver ? "reading the kernel surface…" : "not a driver"}
           <br />
-          <span>no kernel surface was found in this image</span>
+          <span>
+            {isDriver
+              ? "devices, dispatch handlers and IOCTLs are on their way"
+              : "no kernel surface was found in this image"}
+          </span>
         </div>
       </div>
     );

@@ -166,16 +166,22 @@ export default function App() {
     () => (localStorage.getItem("knife.agentDock") as AgentDock) || "bottom",
   );
   const [agentW, setAgentW] = useState(() => loadNum("knife.agentW", 380));
-  const [toasts, setToasts] = useState<Array<{ id: number; text: string }>>([]);
-  const setError = useCallback((text: string | null) => {
+  const [toasts, setToasts] = useState<Array<{ id: number; text: string; ok: boolean }>>([]);
+  // One channel, two tones. Everything used to arrive as an error, so copying an
+  // address or saving a note flashed the same alarm-red box as a failure — the
+  // most frequent messages in the app all looked like something had gone wrong.
+  const toast = useCallback((text: string | null, ok: boolean) => {
     if (!text) return;
     // A backend error is a sentence, not a stack trace; strip the wrapper Tauri
     // adds so the toast reads as the engine wrote it.
     const clean = text.replace(/^Error:\s*/i, "");
     const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, text: clean }]);
+    setToasts((t) => [...t, { id, text: clean, ok }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
   }, []);
+  const setError = useCallback((text: string | null) => toast(text, false), [toast]);
+  /// Something worked. Same channel, calm colour.
+  const notify = useCallback((text: string) => toast(text, true), [toast]);
 
   const [functions, setFunctions] = useState<FnRow[]>([]);
   const [filter, setFilter] = useState("");
@@ -616,6 +622,11 @@ export default function App() {
 
   const switchTo = useCallback(
     async (path: string) => {
+      // Reloading every pane for another binary takes as long as opening one, and
+      // said nothing while it happened: the window kept showing the target you
+      // had left until the new one was ready.
+      setBusy(true);
+      setPhase("switching target");
       try {
         await api.selectTarget(path);
         const res = await api.openTarget(path); // already loaded: just re-reads the summary
@@ -633,6 +644,9 @@ export default function App() {
         if (fns.length) void openFunction(fns[0].addr, false);
       } catch (e) {
         setError(String(e));
+      } finally {
+        setBusy(false);
+        setPhase("");
       }
     },
     [loadViews, openFunction, setError],
@@ -986,6 +1000,9 @@ export default function App() {
         case "/":
           e.preventDefault();
           setLeftView("functions");
+          // The pane has to be open for the filter to exist, never mind be
+          // focused: with it collapsed this key did nothing at all.
+          setLeftOpen(true);
           // Focus happens after the pane has switched.
           setTimeout(() => {
             document.querySelector<HTMLInputElement>(".left .filter input")?.focus();
@@ -998,6 +1015,8 @@ export default function App() {
           setTab((t) => (t === "graph" ? "disasm" : "graph"));
           break;
         case "s":
+          // Cycling a pane nobody can see is not cycling anything.
+          setLeftOpen(true);
           setLeftView((v) => {
             const order: LeftView[] = [
               "functions",
@@ -1013,6 +1032,7 @@ export default function App() {
           });
           break;
         case "x":
+          setXrefOpen(true);
           setXrefDir((d) => (d === "to" ? "from" : d === "from" ? "paths" : "to"));
           break;
         case "t":
@@ -1084,14 +1104,14 @@ export default function App() {
           if (!text) break;
           e.preventDefault();
           void navigator.clipboard.writeText(text);
-          setError(`copied ${text}`);
+          notify(`copied ${text}`);
           break;
         }
         case "Y":
           if (!curName) break;
           e.preventDefault();
           void navigator.clipboard.writeText(curName);
-          setError(`copied ${curName}`);
+          notify(`copied ${curName}`);
           break;
         case "C": {
           // Copy the whole listing, or the current text selection if there is
@@ -1103,7 +1123,7 @@ export default function App() {
           const text = sel && sel.trim() ? sel : listingToText(tab, lines, ir);
           if (!text.trim()) break;
           void navigator.clipboard.writeText(text);
-          setError(
+          notify(
             sel && sel.trim()
               ? `copied selection (${text.split("\n").length} lines)`
               : `copied ${tab === "pseudo" ? "pseudocode" : "disassembly"} (${text.split("\n").length} lines)`,
@@ -1126,7 +1146,7 @@ export default function App() {
               .bookmarkToggle(opened.path, at)
               .then(async (marked) => {
                 setMarks(await api.bookmarksList(opened.path));
-                setError(marked ? `marked ${at}` : `unmarked ${at}`);
+                notify(marked ? `marked ${at}` : `unmarked ${at}`);
               })
               .catch((err) => setError(String(err)));
           }
@@ -1170,10 +1190,7 @@ export default function App() {
       setYaraRules(rules);
       setDetail(await api.binaryDetail());
       api.overview(1024).then(setOverview).catch(() => {});
-      setToasts((t) => [
-        ...t,
-        { id: Date.now(), text: `${n} rule${n === 1 ? "" : "s"} matched; verdict recomputed` },
-      ]);
+      notify(`${n} rule${n === 1 ? "" : "s"} matched; verdict recomputed`);
     } catch (e) {
       setError(String(e));
     }
@@ -1687,6 +1704,7 @@ export default function App() {
                     rows={functions}
                     current={current}
                     risk={riskByFunc}
+                    filter={filter}
                     onPick={(a) => openFunction(a)}
                   />
                 </>
@@ -1700,6 +1718,7 @@ export default function App() {
                   </div>
                   <DriverView
                     report={driver}
+                    isDriver={opened?.is_driver}
                     reachableOnly={drvReach}
                     criticalOnly={drvCrit}
                     ioctlsByHandler={ioctlsByHandler}
@@ -1764,8 +1783,7 @@ export default function App() {
                       const out = await saveDialog({ title: "Export patched binary" });
                       if (typeof out !== "string") return;
                       try {
-                        const msg = await api.exportPatched(out);
-                        setToasts((t) => [...t, { id: Date.now(), text: msg }]);
+                        notify(await api.exportPatched(out));
                       } catch (e) {
                         setError(String(e));
                       }
@@ -1863,7 +1881,7 @@ export default function App() {
                         if (!dest) return;
                         try {
                           const n = await api.exportFindings(dest);
-                          setError(`wrote ${n} finding${n === 1 ? "" : "s"} to ${dest}`);
+                          notify(`wrote ${n} finding${n === 1 ? "" : "s"} to ${dest}`);
                         } catch (err) {
                           setError(String(err));
                         }
@@ -1884,6 +1902,7 @@ export default function App() {
                             : findings
                     }
                     selected={pickedFinding?.addr ?? selected}
+                    total={findings.length}
                     onPick={(f) => {
                       setPickedFinding(f);
                       setSelected(f.addr);
@@ -2124,7 +2143,7 @@ export default function App() {
                         func: curName,
                         copy: (text) => {
                           void navigator.clipboard.writeText(text);
-                          setError(`copied ${text}`);
+                          notify(`copied ${text}`);
                         },
                       }),
                     })
@@ -2271,7 +2290,7 @@ export default function App() {
           {toasts.map((t) => (
             <div
               key={t.id}
-              className="toast"
+              className={"toast" + (t.ok ? " ok" : "")}
               onClick={() => setToasts((all) => all.filter((x) => x.id !== t.id))}
             >
               {t.text}

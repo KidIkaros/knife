@@ -45,6 +45,20 @@ export function SymbolList({
     overscan: 20,
   });
 
+  // A statically linked image genuinely has no imports; saying so is better than
+  // a black rectangle that looks like a failure.
+  if (!items.length) {
+    return (
+      <div className="list">
+        <div className="empty-hint">
+          {showModules ? "no imports" : "no exports"}
+          <br />
+          <span>nothing matched, or the image declares none</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="list" ref={parentRef}>
       <div style={{ height: v.getTotalSize(), position: "relative" }}>
