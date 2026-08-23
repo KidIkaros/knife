@@ -430,8 +430,7 @@ pub fn line_actions(state: State<AppState>, func: String) -> Result<Vec<LineActi
                 .or_else(|| an.function_at(at))
                 .ok_or_else(|| anyhow!("{func} is not a recovered function"))?;
             let function = stored(&l.session, f.addr);
-            let lines =
-                reknife::analysis::ir::decompile(an, &l.session.bin, f, &l.strings, &l.session.db);
+            let lines = l.decompiled(f);
             Ok(lines
                 .iter()
                 .map(|line| idents::line_actions(&line.text, function, &l.session.db))

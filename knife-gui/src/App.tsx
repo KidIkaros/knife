@@ -111,6 +111,21 @@ function saveNum(key: string, value: number) {
   }
 }
 
+/**
+ * Persist a number once it stops changing.
+ *
+ * For a value a drag updates on every mouse-move — a pane width — writing on
+ * each change is a synchronous storage write per frame. Waiting for the value to
+ * settle writes once per drag instead, and the only thing lost if the window
+ * closes inside that window is a few pixels of layout.
+ */
+function useDeferredSave(key: string, value: number) {
+  useEffect(() => {
+    const t = setTimeout(() => saveNum(key, value), 400);
+    return () => clearTimeout(t);
+  }, [key, value]);
+}
+
 /** A draggable split between two panes. */
 function Divider({ onDrag }: { onDrag: (dx: number) => void }) {
   return (
@@ -259,7 +274,16 @@ export default function App() {
   const [noting, setNoting] = useState(false);
   const [noteText, setNoteText] = useState("");
 
-  const curName = functions.find((f) => f.addr === current)?.name ?? current ?? "";
+  // Exact-address lookups run on every render — the title, the status bar — and
+  // a scan of twenty thousand functions per lookup is not free. One pass builds
+  // the map; the lookups are constant.
+  const fnByAddr = useMemo(() => {
+    const m = new Map<string, FnRow>();
+    for (const f of functions) m.set(f.addr, f);
+    return m;
+  }, [functions]);
+
+  const curName = (current ? fnByAddr.get(current)?.name : undefined) ?? current ?? "";
 
   // Reflect the open binary in Discord Rich Presence (no-op if not configured).
   // Deliberately shows no filename — the sample is identified by its hash, so the
@@ -346,22 +370,48 @@ export default function App() {
 
   // IOCTL codes grouped by the dispatch function that decodes them, so the
   // driver view can show each handler's accepted codes beneath it.
+  // Finding the function that contains an address is a range question, so it
+  // needs bounds rather than a key. Parsing every function's address for every
+  // code — two BigInts per candidate, tens of thousands of them per code, redone
+  // whenever the filter box changed the list's identity — is what made opening a
+  // driver crawl. The bounds are parsed once and searched.
+  const fnBounds = useMemo(() => {
+    const rows = functions.map((f) => {
+      const start = BigInt(f.addr);
+      return { start, end: start + BigInt(f.size), addr: f.addr };
+    });
+    rows.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+    return rows;
+  }, [functions]);
+
+  const containing = useCallback(
+    (addr: string) => {
+      const at = BigInt(addr);
+      let lo = 0;
+      let hi = fnBounds.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const r = fnBounds[mid];
+        if (at < r.start) hi = mid - 1;
+        else if (at >= r.end) lo = mid + 1;
+        else return r.addr;
+      }
+      return undefined;
+    },
+    [fnBounds],
+  );
+
   const ioctlsByHandler = useMemo(() => {
     const m = new Map<string, Array<{ code: string; addr: string; method: string }>>();
     if (!driverFull) return m;
     for (const c of driverFull.ioctls) {
-      const site = BigInt(c.addr);
-      const host = functions.find((f) => {
-        const fa = BigInt(f.addr);
-        return site >= fa && site < fa + BigInt(f.size);
-      });
-      const key = host?.addr ?? c.addr;
+      const key = containing(c.addr) ?? c.addr;
       const list = m.get(key) ?? [];
       list.push({ code: c.code, addr: c.addr, method: c.method });
       m.set(key, list);
     }
     return m;
-  }, [driverFull, functions]);
+  }, [driverFull, containing]);
 
   // Show a finding's evidence: pick it and switch to the attack-surface view.
   const showFinding = useCallback((f: Finding) => {
@@ -628,8 +678,11 @@ export default function App() {
     if (typeof file === "string") void doOpen(file);
   }, [doOpen]);
 
-  useEffect(() => saveNum("knife.leftW", leftW), [leftW]);
-  useEffect(() => saveNum("knife.rightW", rightW), [rightW]);
+  // The three widths change on every mouse-move of a drag, and a width is only
+  // worth remembering once it has settled — persisting each pixel meant a
+  // synchronous write to storage on every frame of the drag.
+  useDeferredSave("knife.leftW", leftW);
+  useDeferredSave("knife.rightW", rightW);
   // The center tab rides with the session, so a restart lands you back in
   // pseudocode (or the graphs) instead of always restarting in disassembly.
   useEffect(() => {
@@ -658,7 +711,7 @@ export default function App() {
   useEffect(() => saveNum("knife.leftOpen", leftOpen ? 1 : 0), [leftOpen]);
   useEffect(() => saveNum("knife.rightOpen", rightOpen ? 1 : 0), [rightOpen]);
   useEffect(() => saveNum("knife.xrefOpen", xrefOpen ? 1 : 0), [xrefOpen]);
-  useEffect(() => saveNum("knife.agentW", agentW), [agentW]);
+  useDeferredSave("knife.agentW", agentW);
   useEffect(() => {
     try {
       localStorage.setItem("knife.agentDock", agentDock);
@@ -2199,7 +2252,7 @@ export default function App() {
               ) : null;
             })()}
           {(() => {
-            const f = functions.find((x) => x.addr === current);
+            const f = current ? fnByAddr.get(current) : undefined;
             return f ? (
               <span className="sb-meta">
                 {f.blocks} blocks · {f.size} bytes · {f.incoming} refs

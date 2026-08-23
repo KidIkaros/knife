@@ -56,8 +56,23 @@ pub struct Loaded {
     pub strings: BTreeMap<u64, Located>,
     /// Driver listing hints, when the target is a plausible driver.
     pub hints: Option<BTreeMap<u64, String>>,
+    /// The BYOVD report, when the target really is a driver. A full walk of the
+    /// analysis plus the string map, and the pane re-reads it every time its
+    /// severity or reachability filter is toggled — but both of those are
+    /// post-filters on this value, so it is built once here with the rest of the
+    /// derived state rather than recomputed per request.
+    pub driver: Option<driver::DriverReport>,
     /// Ranked attack-surface findings, canonically sorted.
     pub findings: Vec<audit::Finding>,
+    /// The last function decompiled, and its lines.
+    ///
+    /// Showing the pseudocode tab fetches the lines and the per-line actions
+    /// together, and each call ran the decompiler itself — the most expensive
+    /// operation in the app, run twice over the same function at the same moment,
+    /// on two threads contending for this struct's own lock. Behind a mutex
+    /// because the read path hands out `&Loaded`; cleared whenever recovery
+    /// changes, since a rename rewrites the text.
+    pub pseudo: Mutex<Option<(u64, Vec<reknife::analysis::ir::Line>)>>,
     /// The detail panel, pre-serialized (hashing a large image is not free).
     pub detail: serde_json::Value,
     /// YARA matches for this target, and the rules that produced them. The
@@ -65,6 +80,31 @@ pub struct Loaded {
     /// score exactly as `knife info --rules` does.
     pub yara: Vec<reknife::analysis::yara::RuleMatch>,
     pub yara_rules: Option<String>,
+}
+
+impl Loaded {
+    /// Pseudocode for a function, decompiled once. The lines and the per-line
+    /// actions are two separate requests over the same function, so the second
+    /// one gets the first one's work instead of repeating it.
+    pub fn decompiled(
+        &self,
+        f: &reknife::analysis::engine::Function,
+    ) -> Vec<reknife::analysis::ir::Line> {
+        if let Some((at, lines)) = self.pseudo.lock().unwrap().as_ref() {
+            if *at == f.addr {
+                return lines.clone();
+            }
+        }
+        let lines = reknife::analysis::ir::decompile(
+            &self.session.an,
+            &self.session.bin,
+            f,
+            &self.strings,
+            &self.session.db,
+        );
+        *self.pseudo.lock().unwrap() = Some((f.addr, lines.clone()));
+        lines
+    }
 }
 
 /// Every target the window has open, and which one the views are showing.
@@ -119,6 +159,8 @@ impl AppState {
                 base,
                 strings,
                 hints: None,
+                driver: None,
+                pseudo: Mutex::new(None),
                 findings: Vec::new(),
                 detail: serde_json::Value::Null,
                 yara: Vec::new(),
@@ -289,8 +331,11 @@ fn recompute_derived(loaded: &mut Loaded) {
 fn recompute_derived_with(loaded: &mut Loaded, phase: &dyn Fn(&str)) {
     let session = &loaded.session;
     phase("auditing call sites");
-    let hints = driver::plausibly_a_driver(&session.bin)
-        .then(|| driver::listing_hints(&session.bin, &session.bytes, &session.an));
+    let plausible = driver::plausibly_a_driver(&session.bin);
+    let hints = plausible.then(|| driver::listing_hints(&session.bin, &session.bytes, &session.an));
+    let report = plausible
+        .then(|| driver::report(&session.bin, &session.bytes, &session.an, &loaded.strings))
+        .filter(|r| r.is_driver);
     let mut findings = audit::run(&session.an, &session.bin, &session.bytes);
     findings.sort_by(|a, b| {
         b.severity
@@ -302,6 +347,10 @@ fn recompute_derived_with(loaded: &mut Loaded, phase: &dyn Fn(&str)) {
     let yara_names: Vec<String> = loaded.yara.iter().map(|m| m.rule.clone()).collect();
     let detail = build_detail(&loaded.session, &yara_names);
     loaded.hints = hints;
+    loaded.driver = report;
+    // A rename or a retype rewrites the pseudocode, so the cached copy is no
+    // longer what the analyst would see.
+    *loaded.pseudo.lock().unwrap() = None;
     loaded.findings = findings;
     loaded.detail = detail;
 }

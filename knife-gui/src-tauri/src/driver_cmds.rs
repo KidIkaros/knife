@@ -11,7 +11,6 @@
 
 use crate::dto::hex;
 use crate::state::AppState;
-use reknife::analysis::driver;
 use serde::Serialize;
 use tauri::State;
 
@@ -105,13 +104,11 @@ pub fn driver_report(
     let reachable_only = reachable_only.unwrap_or(false);
     state
         .read(|l| {
-            if !driver::plausibly_a_driver(&l.session.bin) {
+            // Built once with the rest of the derived state: the two filters
+            // below only narrow what it already holds.
+            let Some(r) = l.driver.as_ref() else {
                 return Ok(None);
-            }
-            let r = driver::report(&l.session.bin, &l.session.bytes, &l.session.an, &l.strings);
-            if !r.is_driver {
-                return Ok(None);
-            }
+            };
             Ok(Some(DriverDto {
                 is_driver: r.is_driver,
                 why: r.why.clone(),

@@ -10,7 +10,7 @@ use crate::dto::{
 use crate::state::{AppState, TargetRow};
 use anyhow::{anyhow, Result};
 use reknife::analysis::engine::{self, Analysis, Function};
-use reknife::analysis::{graphs, ir};
+use reknife::analysis::graphs;
 use reknife::db;
 use reknife::listing;
 use reknife::model::SymKind;
@@ -164,8 +164,7 @@ pub fn decompile(state: State<AppState>, selector: String) -> Result<Vec<IrLineD
                 // blank tab rather than a failure.
                 return Ok(Vec::new());
             };
-            let lines = ir::decompile(&l.session.an, &l.session.bin, f, &l.strings, &l.session.db);
-            Ok(lines.iter().map(IrLineDto::from).collect())
+            Ok(l.decompiled(f).iter().map(IrLineDto::from).collect())
         })
         .map_err(|e| e.to_string())
 }
