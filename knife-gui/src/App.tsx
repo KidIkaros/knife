@@ -29,6 +29,7 @@ import { CodeView } from "./components/CodeView";
 import { XrefPane, type RefMode } from "./components/XrefPane";
 import { DetailPanel } from "./components/DetailPanel";
 import { AttackSurface } from "./components/AttackSurface";
+import { CriticalsDashboard } from "./components/CriticalsDashboard";
 import { GraphView } from "./components/GraphView";
 import { StringsList } from "./components/StringsList";
 import { Palette } from "./components/Palette";
@@ -57,7 +58,7 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Console } from "./components/Console";
 import { SymbolList } from "./components/SymbolList";
 
-type Tab = "disasm" | "pseudo" | "graph" | "calls";
+type Tab = "disasm" | "pseudo" | "graph" | "calls" | "criticals";
 type LeftView =
   | "functions"
   | "attack"
@@ -626,7 +627,8 @@ export default function App() {
     }
     try {
       const t = localStorage.getItem("knife.tab");
-      if (t === "disasm" || t === "pseudo" || t === "graph" || t === "calls") lastTab = t;
+      if (t === "disasm" || t === "pseudo" || t === "graph" || t === "calls" || t === "criticals")
+        lastTab = t;
     } catch {
       lastTab = null;
     }
@@ -1723,6 +1725,17 @@ export default function App() {
                   graph
                 </div>
                 <div
+                  className={"tab crit-tab" + (tab === "criticals" ? " active" : "")}
+                  onClick={() => setTab("criticals")}
+                >
+                  criticals
+                  {findings.length > 0 && (
+                    <span className={"tab-badge" + (findings.some((f) => f.severity >= 3) ? " hi" : "")}>
+                      {findings.length}
+                    </span>
+                  )}
+                </div>
+                <div
                   className={"tab" + (tab === "calls" ? " active" : "")}
                   onClick={() => setTab("calls")}
                 >
@@ -1839,7 +1852,17 @@ export default function App() {
                 </div>
               )}
 
-              {tab === "graph" ? (
+              {tab === "criticals" ? (
+                <CriticalsDashboard
+                  findings={findings}
+                  onJump={(f) => {
+                    setTab("disasm");
+                    void openFunction(f.addr);
+                    setSelected(f.addr);
+                  }}
+                  onEvidence={showFinding}
+                />
+              ) : tab === "graph" ? (
                 <GraphView
                   cfg={cfg}
                   onOpenBlock={(a) => { setTab("disasm"); setSelected(a); }}
