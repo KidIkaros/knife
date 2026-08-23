@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import knifechan from "./assets/knifechan.png";
 import { listen } from "@tauri-apps/api/event";
@@ -218,6 +218,13 @@ export default function App() {
   const [yaraRules, setYaraRules] = useState<string | null>(null);
   const [detail, setDetail] = useState<BinaryDetail | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  // The two filter boxes below fetch straight from their input handler, where
+  // there is no effect cleanup to hang a guard on. Each request takes a ticket
+  // and only the newest one is allowed to write, so a slow reply for an earlier
+  // keystroke cannot land on top of a newer one.
+  const symbolReq = useRef(0);
+  const stringReq = useRef(0);
+  const navReq = useRef(0);
 
   const [palette, setPalette] = useState(false);
   const [find, setFind] = useState<string | null>(null);
@@ -418,6 +425,12 @@ export default function App() {
 
   const openFunction = useCallback(
     async (selector: string, push = true) => {
+      // Two navigations in quick succession — a double-click in the list, a
+      // finding chip clicked while the last one is still loading — both used to
+      // apply, and the slower one won. You landed on the function you asked for
+      // first, while the history recorded the other. Only the newest navigation
+      // may write.
+      const gen = ++navReq.current;
       try {
         // Only disassembly and the CFG are fetched up front. Pseudocode and its
         // identifier spans each cost a full decompile — seconds on a large
@@ -427,6 +440,7 @@ export default function App() {
           api.disassemble(selector),
           api.cfg(selector).catch(() => null),
         ]);
+        if (gen !== navReq.current) return;
         setCfg(graph);
         setCgraph(null);
         setActs([]);
@@ -445,7 +459,7 @@ export default function App() {
         setCurrent(entry);
         if (opened?.path) remember(opened.path, entry);
       } catch (e) {
-        setError(String(e));
+        if (gen === navReq.current) setError(String(e));
       }
     },
     [current, opened, remember],
@@ -576,12 +590,17 @@ export default function App() {
   const closeTab = useCallback(
     async (path: string) => {
       try {
+        // Closing a tab you are not reading should not disturb the one you are.
+        // `switchTo` resets everything — the open function, the listing, the
+        // history, the filter — so calling it for the already-active target threw
+        // away your position and dropped you back at its first function.
+        const wasActive = targets.find((t) => t.path === path)?.active ?? false;
         await api.closeTarget(path);
         const rows = await api.listTargets();
         setTargets(rows);
         const next = rows.find((t) => t.active);
         if (next) {
-          void switchTo(next.path);
+          if (wasActive) void switchTo(next.path);
         } else {
           // Nothing left open: back to the welcome screen.
           setOpened(null);
@@ -600,7 +619,7 @@ export default function App() {
         setError(String(e));
       }
     },
-    [switchTo, setError],
+    [switchTo, setError, targets],
   );
 
   const pickAndOpen = useCallback(async () => {
@@ -740,31 +759,47 @@ export default function App() {
 
   // Imports and exports are fetched when their view is opened, and refetched
   // when the target changes.
+  // Every branch is guarded: imports and exports write the *same* state, so
+  // cycling the pane with `s` left both requests in flight and whichever landed
+  // last won — rows from one under the other's heading. The guard drops any
+  // reply whose pane is no longer the one being shown.
   useEffect(() => {
     if (!opened) return;
+    let live = true;
     if (leftView === "driver") {
       api
         .driverReport(drvCrit ? 3 : 1, drvReach)
-        .then(setDriver)
-        .catch(() => setDriver(null));
+        .then((r) => live && setDriver(r))
+        .catch(() => live && setDriver(null));
     } else if (leftView === "facts") {
-      api.analystFacts().then(setFacts).catch(() => setFacts([]));
+      api.analystFacts().then((r) => live && setFacts(r)).catch(() => live && setFacts([]));
     } else if (leftView === "patches") {
-      api.patchRuns().then(setPatches).catch(() => setPatches([]));
+      api.patchRuns().then((r) => live && setPatches(r)).catch(() => live && setPatches([]));
     } else if (leftView === "imports") {
-      api.imports().then(setSymbols).catch(() => setSymbols([]));
+      api.imports().then((r) => live && setSymbols(r)).catch(() => live && setSymbols([]));
     } else if (leftView === "exports") {
-      api.exports().then(setSymbols).catch(() => setSymbols([]));
+      api.exports().then((r) => live && setSymbols(r)).catch(() => live && setSymbols([]));
     }
+    return () => {
+      live = false;
+    };
   }, [leftView, opened, drvReach, drvCrit]);
 
   // Re-filter the function list as the query changes.
+  //
+  // Guarded for the same reason, and it bites harder here: a narrower query
+  // matches fewer functions and can come back first, so typing quickly left the
+  // list showing results for a query the box no longer held.
   useEffect(() => {
     if (!opened) return;
+    let live = true;
     api
       .listFunctions(filter || undefined, false, FN_LIMIT)
-      .then(setFunctions)
-      .catch((e) => setError(String(e)));
+      .then((r) => live && setFunctions(r))
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
   }, [filter, opened]);
 
   // Decompile lazily: the first time the pseudocode tab is shown for a function.
@@ -1679,7 +1714,10 @@ export default function App() {
                       onChange={(e) => {
                         const q = e.target.value || undefined;
                         const call = leftView === "imports" ? api.imports : api.exports;
-                        call(q).then(setSymbols).catch(() => setSymbols([]));
+                        const gen = ++symbolReq.current;
+                        call(q)
+                          .then((r) => gen === symbolReq.current && setSymbols(r))
+                          .catch(() => gen === symbolReq.current && setSymbols([]));
                       }}
                     />
                   </div>
@@ -1700,10 +1738,11 @@ export default function App() {
                       placeholder="filter literals…"
                       onChange={(e) => {
                         const q = e.target.value;
+                        const gen = ++stringReq.current;
                         api
                           .strings(q || undefined, !q, 5000)
-                          .then(setStrings)
-                          .catch(() => setStrings([]));
+                          .then((r) => gen === stringReq.current && setStrings(r))
+                          .catch(() => gen === stringReq.current && setStrings([]));
                       }}
                     />
                   </div>
