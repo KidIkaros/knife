@@ -235,20 +235,27 @@ export default function App() {
   const curName = functions.find((f) => f.addr === current)?.name ?? current ?? "";
 
   // Reflect the open binary in Discord Rich Presence (no-op if not configured).
+  // Deliberately shows no filename — the sample is identified by its hash, so the
+  // status never reveals *what* is being reversed. Function count and sink count
+  // go on the first line, the MD5 on the second and on the image hover. Detail
+  // and findings arrive after the target opens, so the effect re-runs and fills
+  // the hash and sink count in when they land.
   useEffect(() => {
     if (opened) {
-      const bits = [`${opened.functions} functions`];
-      if (opened.high_risk) bits.push(`${opened.high_risk} high-risk`);
+      const md5 = detail?.hashes.md5 ?? "";
+      const sinks = findings.length;
       api
         .presenceUpdate(
-          opened.is_driver ? "Hunting a driver" : "Reverse engineering",
-          `${opened.title} · ${bits.join(" · ")}`,
+          `${opened.functions} functions · ${sinks} sink${sinks === 1 ? "" : "s"}`,
+          // MD5 — short enough (32 hex) to show whole, no label, no truncation.
+          md5 || "analyzing…",
+          md5 || "",
         )
         .catch(() => {});
     } else {
-      api.presenceUpdate("Idle", "no binary open").catch(() => {});
+      api.presenceUpdate("Idle", "no binary open", "").catch(() => {});
     }
-  }, [opened]);
+  }, [opened, detail, findings]);
 
   // The audit findings, indexed for the views: highest severity per function for
   // the list's risk dots, and per-address for the inline markers in the code.
