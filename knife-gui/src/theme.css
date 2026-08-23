@@ -3098,3 +3098,26 @@ body {
   background: var(--critical);
   border-color: var(--critical);
 }
+
+/* xref pane collapse */
+.xref.collapsed {
+  height: auto;
+  flex: 0 0 auto;
+}
+.xref-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 5px;
+  width: 22px;
+  height: 18px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 8px;
+}
+.xref-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}

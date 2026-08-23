@@ -9,6 +9,8 @@ export function XrefPane({
   onDir,
   about,
   onJump,
+  collapsed,
+  onToggle,
 }: {
   rows: XrefRow[];
   paths: PathRow[];
@@ -17,9 +19,11 @@ export function XrefPane({
   /** A pinned subject (a string literal, say), when it is not the open function. */
   about?: string | null;
   onJump: (addr: string) => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }) {
   return (
-    <div className="xref">
+    <div className={"xref" + (collapsed ? " collapsed" : "")}>
       <div className="panel-head">
         <span>{dir === "paths" ? "reachability" : "xrefs"}</span>
         {about && (
@@ -44,7 +48,17 @@ export function XrefPane({
             paths
           </button>
         </div>
+        {onToggle && (
+          <button
+            className="xref-toggle"
+            title={collapsed ? "show the reference pane" : "hide the reference pane"}
+            onClick={onToggle}
+          >
+            {collapsed ? "▸" : "▾"}
+          </button>
+        )}
       </div>
+      {!collapsed && (
       <div className="rows">
         {dir === "paths" ? (
           paths.length === 0 ? (
@@ -82,6 +96,7 @@ export function XrefPane({
           </>
         )}
       </div>
+      )}
     </div>
   );
 }

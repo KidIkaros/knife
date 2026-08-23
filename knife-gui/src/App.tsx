@@ -125,6 +125,7 @@ export default function App() {
   // Panels collapse, and the agent docks left / bottom / right. All persisted.
   const [leftOpen, setLeftOpen] = useState(() => loadNum("knife.leftOpen", 1) === 1);
   const [rightOpen, setRightOpen] = useState(() => loadNum("knife.rightOpen", 1) === 1);
+  const [xrefOpen, setXrefOpen] = useState(() => loadNum("knife.xrefOpen", 1) === 1);
   const [agentDock, setAgentDock] = useState<AgentDock>(
     () => (localStorage.getItem("knife.agentDock") as AgentDock) || "bottom",
   );
@@ -587,6 +588,7 @@ export default function App() {
   }, [sevFilter]);
   useEffect(() => saveNum("knife.leftOpen", leftOpen ? 1 : 0), [leftOpen]);
   useEffect(() => saveNum("knife.rightOpen", rightOpen ? 1 : 0), [rightOpen]);
+  useEffect(() => saveNum("knife.xrefOpen", xrefOpen ? 1 : 0), [xrefOpen]);
   useEffect(() => saveNum("knife.agentW", agentW), [agentW]);
   useEffect(() => {
     try {
@@ -1929,6 +1931,8 @@ export default function App() {
                   dir={xrefDir}
                   onDir={setXrefDir}
                   about={xrefTarget}
+                  collapsed={!xrefOpen}
+                  onToggle={() => setXrefOpen((v) => !v)}
                   onJump={async (a) => {
                     await openFunction(a);
                     // Caller rows carry the exact referencing instruction;
