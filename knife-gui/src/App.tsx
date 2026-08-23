@@ -26,7 +26,7 @@ import {
   type Overview,
 } from "./api";
 import { FunctionList } from "./components/FunctionList";
-import { CodeView } from "./components/CodeView";
+import { CodeView, type CodeViewHandle } from "./components/CodeView";
 import { NavigatorBand } from "./components/NavigatorBand";
 import { XrefPane, type RefMode } from "./components/XrefPane";
 import { DetailPanel } from "./components/DetailPanel";
@@ -225,6 +225,7 @@ export default function App() {
   const symbolReq = useRef(0);
   const stringReq = useRef(0);
   const navReq = useRef(0);
+  const codeRef = useRef<CodeViewHandle>(null);
 
   const [palette, setPalette] = useState(false);
   const [find, setFind] = useState<string | null>(null);
@@ -1242,11 +1243,27 @@ export default function App() {
 
   useEffect(() => {
     if (!hits.length) return;
-    const idx = hits[Math.min(hit, hits.length - 1)];
-    document
-      .querySelector(`.code [data-line="${idx}"]`)
-      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    codeRef.current?.scrollToLine(hits[Math.min(hit, hits.length - 1)]);
   }, [hit, hits]);
+
+  // A newly opened function starts at its top. The scroll container outlives the
+  // listing inside it, so without this you arrive halfway down a function because
+  // that is where you were reading the last one.
+  useEffect(() => {
+    if (current) codeRef.current?.scrollToLine(0);
+  }, [current]);
+
+  // Bring the selected instruction into view. Picking a finding — from the
+  // attack surface, the criticals dashboard, the strip above the code, or by
+  // cycling with `.` and `,` — selects a line that is usually nowhere near the
+  // top of the function, and nothing used to scroll to it: the evidence named an
+  // address the listing was not showing. Only for the disassembly tab, whose
+  // lines are addressed; the pseudocode tab has its own selection.
+  useEffect(() => {
+    if (tab !== "disasm" || !selected) return;
+    const idx = lines.findIndex((l) => l.kind === "insn" && l.addr === selected);
+    if (idx >= 0) codeRef.current?.scrollToLine(idx);
+  }, [selected, lines, tab]);
 
   const pickLeft = useCallback(
     (v: LeftView) => {
@@ -2027,6 +2044,7 @@ export default function App() {
                 <div className="code decompiling">decompiling…</div>
               ) : (
                 <CodeView
+                  ref={codeRef}
                   tab={tab}
                   lines={lines}
                   ir={ir}
