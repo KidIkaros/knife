@@ -4,8 +4,8 @@
 //! reply and turns `anyhow` errors into strings the frontend can show.
 
 use crate::dto::{
-    hex, CfgDto, CfgEdge, CfgNode, FindingDto, FnRow, IrLineDto, LineDto, OpenResult, StringRow,
-    XrefRow,
+    hex, CfgDto, CfgEdge, CfgNode, FindingDto, FnRow, IrLineDto, LineDto, OpenResult,
+    OverviewBucket, OverviewDto, StringRow, XrefRow,
 };
 use crate::state::{AppState, TargetRow};
 use anyhow::{anyhow, Result};
@@ -270,6 +270,79 @@ pub fn hex_dump(
                 });
             }
             Ok(rows)
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The navigator band: a whole-file overview sampled into buckets, each carrying
+/// its entropy, the section it falls in, and the audit findings that land in it.
+///
+/// Laid out in file-offset space — the natural domain of entropy and a linear
+/// read of the image. Findings (virtual addresses) and the entry point are
+/// mapped into that space here, so the frontend paints a ready model; each
+/// bucket also carries a representative virtual address for click-to-seek. One
+/// linear entropy pass over the image, so it is fetched once per target, not per
+/// edit.
+#[tauri::command]
+pub fn overview(state: State<AppState>, buckets: usize) -> Result<OverviewDto, String> {
+    state
+        .read(|l| {
+            let bin = &l.session.bin;
+            let bytes = &l.session.bytes;
+            let base = l.base;
+            let size = bytes.len();
+            if size == 0 {
+                return Ok(OverviewDto {
+                    size: 0,
+                    bucket_bytes: 0,
+                    buckets: Vec::new(),
+                    entry: None,
+                });
+            }
+            let n = buckets.clamp(64, 2048);
+            let step = size.div_ceil(n).max(1);
+
+            // One bucket per slice: entropy, the owning section, and a
+            // representative virtual address for seeking.
+            let mut out: Vec<OverviewBucket> = bytes
+                .chunks(step)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let off = (i * step) as u64;
+                    let section = bin.sections.iter().find(|s| {
+                        s.file_size > 0 && off >= s.file_off && off < s.file_off + s.file_size
+                    });
+                    OverviewBucket {
+                        off,
+                        va: engine::off_to_va(bin, base, off).map(hex),
+                        entropy: reknife::analysis::entropy::entropy(chunk),
+                        section: section.map(|s| s.name.clone()),
+                        code: section.map(|s| s.exec).unwrap_or(false),
+                        findings: 0,
+                        max_sev: 0,
+                    }
+                })
+                .collect();
+
+            // Fold each finding into its bucket by mapping the call site's
+            // virtual address back to a file offset.
+            let last = out.len().saturating_sub(1);
+            for f in &l.findings {
+                if let Some(off) = engine::va_to_off(bin, base, f.addr) {
+                    let b = &mut out[(off / step).min(last)];
+                    b.findings += 1;
+                    b.max_sev = b.max_sev.max(f.severity);
+                }
+            }
+
+            let entry = engine::va_to_off(bin, base, bin.entry).map(|off| (off / step).min(last));
+
+            Ok(OverviewDto {
+                size: size as u64,
+                bucket_bytes: step as u64,
+                buckets: out,
+                entry,
+            })
         })
         .map_err(|e| e.to_string())
 }

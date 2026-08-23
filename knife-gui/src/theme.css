@@ -252,6 +252,80 @@ body {
   background: var(--critical);
 }
 
+/* ── navigator band ───────────────────────────────────────────────────── */
+.navband {
+  position: relative;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  user-select: none;
+}
+
+.navband-labels {
+  display: flex;
+  align-items: center;
+  height: 15px;
+  font-size: 10px;
+  color: var(--faint);
+  /* Purely decorative section captions: never let them catch a click meant for
+     the track, and never let them be text-selected (the stray blue highlight).
+     WebView2 honours the -webkit- form, so set both. */
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* One tile per section run: centred over its own span, clipped to it, and
+   never wider than the space it owns. */
+.navband-label {
+  min-width: 0;
+  padding: 0 3px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: center;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+  letter-spacing: 0.3px;
+}
+
+/* Executable sections read a touch brighter than data — a neutral tone, not the
+   alarm-red accent, so the caption looks intentional over the entropy bars. */
+.navband-label.code {
+  color: var(--text);
+}
+
+.navband-track {
+  display: block;
+  width: 100%;
+  height: 24px;
+  cursor: crosshair;
+}
+
+.navband-caret {
+  fill: var(--text);
+  opacity: 0.9;
+}
+
+.navband-tip {
+  position: absolute;
+  top: 40px;
+  z-index: 40;
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.navband-tip-va {
+  color: var(--faint);
+}
+
 /* ── hex inspector ────────────────────────────────────────────────────── */
 .hexcard {
   position: fixed;

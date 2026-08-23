@@ -23,9 +23,11 @@ import {
   type PathRow,
   type YaraHit,
   type Suggestion,
+  type Overview,
 } from "./api";
 import { FunctionList } from "./components/FunctionList";
 import { CodeView } from "./components/CodeView";
+import { NavigatorBand } from "./components/NavigatorBand";
 import { XrefPane, type RefMode } from "./components/XrefPane";
 import { DetailPanel } from "./components/DetailPanel";
 import { AttackSurface } from "./components/AttackSurface";
@@ -196,6 +198,7 @@ export default function App() {
   const [yara, setYara] = useState<YaraHit[]>([]);
   const [yaraRules, setYaraRules] = useState<string | null>(null);
   const [detail, setDetail] = useState<BinaryDetail | null>(null);
+  const [overview, setOverview] = useState<Overview | null>(null);
 
   const [palette, setPalette] = useState(false);
   const [find, setFind] = useState<string | null>(null);
@@ -421,6 +424,9 @@ export default function App() {
       .driverReport(1, false)
       .then(setDriverFull)
       .catch(() => setDriverFull(null));
+    // The navigator band is one linear entropy pass over the image; fetch it off
+    // the critical path so the panes paint first.
+    api.overview(1024).then(setOverview).catch(() => setOverview(null));
     return fns;
   }, []);
   // Cycle through the ranked weaknesses in place — IDA's mark navigation. Each
@@ -540,6 +546,7 @@ export default function App() {
           setFunctions([]);
           setFindings([]);
           setDetail(null);
+          setOverview(null);
           setStrings([]);
           setCurrent(null);
           setLines([]);
@@ -1014,6 +1021,7 @@ export default function App() {
       setYara(hits);
       setYaraRules(rules);
       setDetail(await api.binaryDetail());
+      api.overview(1024).then(setOverview).catch(() => {});
       setToasts((t) => [
         ...t,
         { id: Date.now(), text: `${n} rule${n === 1 ? "" : "s"} matched; verdict recomputed` },
@@ -1029,6 +1037,7 @@ export default function App() {
       setYara([]);
       setYaraRules(null);
       setDetail(await api.binaryDetail());
+      api.overview(1024).then(setOverview).catch(() => {});
     } catch (e) {
       setError(String(e));
     }
@@ -1342,6 +1351,20 @@ export default function App() {
             </div>
           ))}
         </div>
+      )}
+
+      {opened && (
+        <NavigatorBand
+          overview={overview}
+          current={selected ?? current}
+          onSeek={(va) => {
+            // A navigator click may land on code or data; the disassembly tab
+            // renders both (a data view for non-function addresses), so seek
+            // there. openFunction handles the resolve and the fallback.
+            setTab("disasm");
+            void openFunction(va);
+          }}
+        />
       )}
 
       <div className="body">

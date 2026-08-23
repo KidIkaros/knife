@@ -360,6 +360,44 @@ pub fn sections(bin: &Binary) -> Vec<SectionDto> {
         .collect()
 }
 
+// ── navigator overview band ─────────────────────────────────────────────────
+
+/// One bucket of the whole-file navigator band: a slice of the image summarised
+/// by its entropy, the section it falls in, and the audit findings that land in
+/// it. Laid out in file-offset space (the natural domain of entropy); `va` is a
+/// representative virtual address so the frontend can seek without knowing the
+/// section map.
+#[derive(Serialize)]
+pub struct OverviewBucket {
+    /// File offset of the bucket start. A file offset is bounded by the file
+    /// size, so it stays a JSON number rather than a hex string.
+    pub off: u64,
+    /// Representative virtual address (`off_to_va`), or `None` for a bucket that
+    /// is not mapped into the address space (headers, padding, overlay).
+    pub va: Option<String>,
+    /// Mean Shannon entropy of the slice, 0..8.
+    pub entropy: f64,
+    /// Name of the section this bucket falls in, if any.
+    pub section: Option<String>,
+    /// The owning section is executable (code) rather than data.
+    pub code: bool,
+    /// Audit findings whose call site lands in this bucket.
+    pub findings: u32,
+    /// Highest severity among those findings (0 when there are none).
+    pub max_sev: u8,
+}
+
+/// The navigator band model for the open target.
+#[derive(Serialize)]
+pub struct OverviewDto {
+    pub size: u64,
+    /// Bytes per bucket (the sampling step), so the frontend can label ranges.
+    pub bucket_bytes: u64,
+    pub buckets: Vec<OverviewBucket>,
+    /// Index of the bucket containing the entry point, for a caret anchor.
+    pub entry: Option<usize>,
+}
+
 // ── control-flow graph ──────────────────────────────────────────────────────
 
 /// One basic block, with enough of its body to render a readable card.

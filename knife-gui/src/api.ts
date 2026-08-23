@@ -77,6 +77,25 @@ export interface Hashes {
   imphash: string | null;
 }
 
+// One column of the navigator band: a file-offset slice summarised by entropy,
+// its owning section, and the audit findings that land in it.
+export interface OverviewBucket {
+  off: number;
+  va: string | null;
+  entropy: number;
+  section: string | null;
+  code: boolean;
+  findings: number;
+  max_sev: number;
+}
+
+export interface Overview {
+  size: number;
+  bucket_bytes: number;
+  buckets: OverviewBucket[];
+  entry: number | null;
+}
+
 export interface Mitigation {
   name: string;
   state: string;
@@ -334,6 +353,7 @@ export const api = {
   exportDot: (kind: "cfg" | "calls", selector: string, dest: string) =>
     invoke<[string, number, number]>("export_dot", { kind, selector, dest }),
   binaryDetail: () => invoke<BinaryDetail>("binary_detail"),
+  overview: (buckets: number) => invoke<Overview>("overview", { buckets }),
   cfg: (selector: string) => invoke<Cfg>("cfg", { selector }),
   bookmarksList: (path: string) => invoke<BookmarkRow[]>("bookmarks_list", { path }),
   bookmarkToggle: (path: string, addr: string, label?: string) =>
