@@ -3270,6 +3270,7 @@ mod tests {
             detail: "format argument originates from an external-input API, not a constant string"
                 .into(),
             reachable: true,
+            trail: Vec::new(),
         });
         app.toggle_sinks();
         let out = rendered(&mut app, 110, 30);

@@ -89,6 +89,12 @@ pub struct Finding {
     pub detail: String,
     /// The call sits in a function reachable from an entry point or export.
     pub reachable: bool,
+    /// The instructions the provenance walk passed through deciding this: where
+    /// the dangerous argument was produced, every step that carried it, and the
+    /// clamp that bounded it if there was one. Ascending, and empty when the
+    /// walk found nothing to say — a reader can highlight the flow instead of
+    /// taking the explanation on faith.
+    pub trail: Vec<u64>,
 }
 
 /// What the backward walk concluded about where a register's value came from.
@@ -197,6 +203,16 @@ fn classify(
     reachable: bool,
 ) -> Option<Finding> {
     let addr = block.insns[call_idx].addr + an.display_base;
+    // Every instruction the walks below touch, gathered as they run. `mk` reads
+    // it when it builds the finding, and each path has already resolved the
+    // provenance it cares about by then — so a finding carries the flow that
+    // justified it without every arm having to pass it along.
+    let seen: std::cell::RefCell<BTreeSet<u64>> = std::cell::RefCell::new(BTreeSet::new());
+    let prov = |arg: u8| {
+        let p = provenance(an, bin, bytes, func, block, call_idx, arg, win64);
+        seen.borrow_mut().extend(&p.trail);
+        p
+    };
     let mk = |pattern, severity, detail: String| Finding {
         addr,
         func: None,
@@ -205,13 +221,13 @@ fn classify(
         severity,
         detail,
         reachable,
+        trail: seen.borrow().iter().map(|a| a + an.display_base).collect(),
     };
 
     // The copy destination is the first argument of every copy sink. A write
     // into a fixed-size stack buffer is the classic overflow, so it is worth
     // knowing whichever length pattern applies.
-    let dest_is_stack =
-        provenance(an, bin, bytes, func, block, call_idx, 1, win64).contains(Origin::Stack);
+    let dest_is_stack = prov(1).contains(Origin::Stack);
 
     match check {
         Check::Unbounded => {
@@ -222,8 +238,7 @@ fn classify(
             // bottom band. This is exactly the false positive a run against real
             // software surfaces: `strcpy(local, "some literal")`.
             if dest_is_stack {
-                let source = source_arg(api)
-                    .map(|arg| provenance(an, bin, bytes, func, block, call_idx, arg, win64));
+                let source = source_arg(api).map(&prov);
                 if source.as_ref().is_some_and(|p| p.is_only(Origin::Fixed)) {
                     return Some(mk(
                         "stack-overflow",
@@ -261,7 +276,7 @@ fn classify(
             // A format pointer that is a fixed constant is the normal, safe
             // case; a runtime pointer is the format-string bug. Anything we
             // could not resolve is left alone rather than guessed at.
-            let p = provenance(an, bin, bytes, func, block, call_idx, arg, win64);
+            let p = prov(arg);
             if p.contains(Origin::External)
                 || p.contains(Origin::Argument)
                 || p.contains(Origin::Dynamic)
@@ -291,7 +306,7 @@ fn classify(
         // an extreme, so the finding is kept but ranked well below the raw ones:
         // still worth a glance, no longer worth an afternoon.
         Check::AllocSize(arg) => {
-            let p = provenance(an, bin, bytes, func, block, call_idx, arg, win64);
+            let p = prov(arg);
             if p.contains(Origin::Multiply) {
                 let (sev, src) = arith_severity(&p);
                 Some(sized(
@@ -317,7 +332,7 @@ fn classify(
             }
         }
         Check::CopySize(arg) => {
-            let p = provenance(an, bin, bytes, func, block, call_idx, arg, win64);
+            let p = prov(arg);
             // A stack destination turns an attacker-influenced length into a
             // stack-smash rather than a heap one, worth saying in the finding.
             let dst = if dest_is_stack {
@@ -419,6 +434,17 @@ struct Prov {
     /// value between its computation and the call, so a raw subtraction or
     /// multiply cannot actually reach an extreme.
     bounded: bool,
+    /// The instructions the walk passed through on its way from the call back to
+    /// the origin: every one that writes the tracked register, the clamp that
+    /// bounds it, and the external call that produced it.
+    ///
+    /// A set, not a path. The walk unions its results in two places — the
+    /// operands of a multiply or subtract, and the predecessors of a block — so
+    /// no single line through the function exists to report. What is honest is
+    /// "these instructions participate in the value", which is also exactly what
+    /// a reader wants highlighted. Ordered, so the same image always reports the
+    /// same trail.
+    trail: BTreeSet<u64>,
 }
 
 impl Prov {
@@ -426,11 +452,26 @@ impl Prov {
         Self {
             origins: BTreeSet::from([origin]),
             bounded,
+            trail: BTreeSet::new(),
         }
     }
 
     fn unknown(bounded: bool) -> Self {
         Self::one(Origin::Unknown, bounded)
+    }
+
+    /// As `one`, but crediting the instruction the origin was read from.
+    fn at(origin: Origin, bounded: bool, addr: u64) -> Self {
+        let mut p = Self::one(origin, bounded);
+        p.trail.insert(addr);
+        p
+    }
+
+    /// Fold the instructions this walk already visited into a result built from
+    /// a deeper one, so a returned provenance carries the whole chain.
+    fn with(mut self, visited: &BTreeSet<u64>) -> Self {
+        self.trail.extend(visited);
+        self
     }
 
     fn contains(&self, origin: Origin) -> bool {
@@ -520,12 +561,14 @@ fn provenance_32(
         if seen != arg {
             continue;
         }
-        // This push supplies the argument. Classify what it pushes.
+        // This push supplies the argument, so it is the first step of the flow
+        // whatever it turns out to push. Classify what that is.
+        let pushed_at = ins.addr;
         return match d.op0_kind() {
             OpKind::Register => {
                 // `push eax` where eax was `lea eax,[ebp-0x28]` or a load: trace
                 // the register back from just before this push.
-                resolve_reg(
+                let mut p = resolve_reg(
                     an,
                     bin,
                     bytes,
@@ -535,20 +578,23 @@ fn provenance_32(
                     d.op0_register().full_register(),
                     0,
                     false,
-                )
+                );
+                p.trail.insert(pushed_at);
+                p
             }
-            OpKind::Memory => Prov::one(Origin::Dynamic, false),
+            OpKind::Memory => Prov::at(Origin::Dynamic, false, pushed_at),
             _ => {
                 // A pushed immediate: a constant, or a fixed pointer if it lands
                 // on a string (`push offset "literal"`).
                 let imm = d.immediate(0);
-                Prov::one(
+                Prov::at(
                     if points_at_string(bin, an, bytes, imm) {
                         Origin::Fixed
                     } else {
                         Origin::Constant
                     },
                     false,
+                    pushed_at,
                 )
             }
         };
@@ -573,6 +619,9 @@ fn resolve_reg(
     let mut want = want_in;
     let mut bounded = false;
     let mut info = InstructionInfoFactory::new();
+    // Every instruction this walk decides is part of the value, so the caller can
+    // show the flow rather than only name its origin.
+    let mut visited: BTreeSet<u64> = BTreeSet::new();
 
     for j in (0..upto).rev() {
         let ins = &block.insns[j];
@@ -590,9 +639,9 @@ fn resolve_reg(
                     .map(bare_name)
                     .is_some_and(external_return)
             {
-                return Prov::one(Origin::External, bounded);
+                return Prov::at(Origin::External, bounded, ins.addr).with(&visited);
             }
-            return Prov::unknown(bounded);
+            return Prov::unknown(bounded).with(&visited);
         }
 
         // A conditional move into the tracked register is the min/max clamp
@@ -602,12 +651,16 @@ fn resolve_reg(
         // clamp and keep following the kept value.
         if is_cmov(&d) && writes_reg(&mut info, &d, want) {
             bounded = true;
+            visited.insert(ins.addr);
             continue;
         }
 
         if !writes_reg(&mut info, &d, want) {
             continue;
         }
+        // Past this point the instruction writes the value being traced, so it
+        // belongs to the flow whichever way the walk goes from here.
+        visited.insert(ins.addr);
         // A mask bounds the value to the immediate, which is the other way a
         // subtraction or product is made safe.
         if d.mnemonic() == Mnemonic::And && d.op1_kind() != OpKind::Register {
@@ -642,22 +695,25 @@ fn resolve_reg(
                 .collect();
             let mut origins = BTreeSet::from([origin]);
             let mut b = bounded;
+            let mut trail = visited;
             for r in reads {
                 let sub = resolve_reg(an, bin, bytes, func, block, j, r, depth + 1, win64);
                 origins.extend(sub.origins);
                 b |= sub.bounded;
+                trail.extend(sub.trail);
             }
             return Prov {
                 origins,
                 bounded: b,
+                trail,
             };
         }
-        return Prov::one(origin, bounded);
+        return Prov::at(origin, bounded, ins.addr).with(&visited);
     }
 
     // Not written in this block. Join every predecessor's possible origins.
     if depth >= 2 {
-        return Prov::unknown(bounded);
+        return Prov::unknown(bounded).with(&visited);
     }
     let preds: Vec<&crate::analysis::engine::BasicBlock> = func
         .blocks
@@ -666,13 +722,14 @@ fn resolve_reg(
         .collect();
     if preds.is_empty() {
         if block.start == func.addr && an.bits == 64 && abi_arg_register(want, win64) {
-            return Prov::one(Origin::Argument, bounded);
+            return Prov::one(Origin::Argument, bounded).with(&visited);
         }
-        return Prov::unknown(bounded);
+        return Prov::unknown(bounded).with(&visited);
     }
 
     let mut origins = BTreeSet::new();
     let mut all_bounded = true;
+    let mut trail = visited;
     for p in preds {
         let r = resolve_reg(
             an,
@@ -687,10 +744,12 @@ fn resolve_reg(
         );
         all_bounded &= r.bounded;
         origins.extend(r.origins);
+        trail.extend(r.trail);
     }
     Prov {
         origins,
         bounded: bounded || all_bounded,
+        trail,
     }
 }
 
@@ -1208,6 +1267,56 @@ mod tests {
             "expected format-string, got {:?}",
             f.iter().map(|x| x.pattern).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_finding_carries_the_instructions_its_argument_came_through() {
+        // `mov rdi, [rsi]` immediately before the call is what produced the
+        // format pointer, so it is what a reader should be shown — naming the
+        // origin is not the same as being able to point at it.
+        let code = vec![0x48, 0x8b, 0x3e]; // mov rdi, [rsi], 3 bytes
+        let findings = Harness::new("printf", code).findings();
+        let hit = findings
+            .iter()
+            .find(|f| f.pattern == "format-string")
+            .expect("a format string loaded from memory is dangerous");
+        assert!(
+            hit.trail.contains(&(hit.addr - 3)),
+            "the load that produced the format pointer should be on the trail: \
+             call at {:#x}, trail {:#x?}",
+            hit.addr,
+            hit.trail
+        );
+        // In this straight-line fixture every step precedes the call. That is
+        // not a general law: a loop's back edge makes the call's own block reach
+        // itself, so on real code a step can sit at a higher address than the
+        // call it feeds.
+        assert!(
+            hit.trail.iter().all(|a| *a < hit.addr),
+            "in one linear block the steps precede the call: call at {:#x}, trail {:#x?}",
+            hit.addr,
+            hit.trail
+        );
+        assert!(
+            hit.trail.windows(2).all(|w| w[0] < w[1]),
+            "the trail is ascending and free of repeats: {:#x?}",
+            hit.trail
+        );
+    }
+
+    #[test]
+    fn a_constant_argument_leaves_a_short_trail() {
+        // `mov edx, 16` then memcpy: the length is a compile-time constant, so
+        // the walk stops at that one instruction and has nothing further to say.
+        let code = vec![0xba, 0x10, 0x00, 0x00, 0x00]; // mov edx, 16
+        let findings = Harness::new("memcpy", code).findings();
+        for f in &findings {
+            assert!(
+                f.trail.len() <= 2,
+                "a constant length should not drag a long trail: {:#x?}",
+                f.trail
+            );
+        }
     }
 
     #[test]

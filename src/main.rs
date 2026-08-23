@@ -1948,6 +1948,7 @@ fn cmd_audit(file: &str, reachable_only: bool, as_json: bool, db_path: Option<&s
                     "severity": f.severity,
                     "reachable": f.reachable,
                     "detail": f.detail,
+                    "trail": f.trail,
                 })
             })
             .collect();
