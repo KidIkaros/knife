@@ -388,22 +388,32 @@ async fn stream_once(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    // Bytes, not text. A chunk boundary falls wherever the network puts it, which
+    // can be in the middle of a multi-byte character: decoding each chunk on its
+    // own turned that character into a replacement one, and when the split landed
+    // inside a `data:` line the JSON no longer parsed and the whole delta was
+    // dropped — losing a piece of the reply, or a fragment of a tool call's
+    // arguments, with nothing said about it. Lines are decoded once they are
+    // whole, so a character split across chunks survives.
+    let mut buf: Vec<u8> = Vec::new();
     let mut content = String::new();
     let mut tools: Vec<ToolAcc> = Vec::new();
+    let mut cancelled = false;
 
     while let Some(chunk) = stream.next().await {
         if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
             // Return what streamed so far rather than an error: a stop is a
             // choice, not a failure.
+            cancelled = true;
             break;
         }
         let bytes = chunk.map_err(|e| anyhow!("stream interrupted: {e}"))?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.extend_from_slice(&bytes);
 
         // Server-sent events: one JSON object per data line; [DONE] closes.
-        while let Some(nl) = buf.find('\n') {
-            let line: String = buf.drain(..=nl).collect();
+        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+            let line = buf.drain(..=nl).collect::<Vec<u8>>();
+            let line = String::from_utf8_lossy(&line);
             let line = line.trim();
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
@@ -452,6 +462,13 @@ async fn stream_once(
                 }
             }
         }
+    }
+    // A cancelled stream stops mid-message, so any tool call it had begun
+    // accumulating is a fragment: the name may be half-written and the arguments
+    // are rarely valid JSON. Running those is worse than running nothing, and the
+    // user asked for nothing. Keep the prose, drop the calls.
+    if cancelled {
+        return Ok((content, Vec::new()));
     }
     Ok((content, tools))
 }
@@ -530,6 +547,13 @@ async fn agent_turn(
     let mut seen: HashSet<String> = HashSet::new();
 
     for _ in 0..rounds {
+        // Check before the request, not only inside the stream. The in-stream
+        // check cannot fire until the first chunk arrives, so a stop between
+        // rounds still paid for a whole round trip — several of them, on an
+        // autopilot budget, each one billed and then thrown away.
+        if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         emit(&app, json!({ "kind": "round" }));
         let body = json!({
             "model": model,
