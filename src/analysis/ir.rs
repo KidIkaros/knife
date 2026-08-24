@@ -81,7 +81,12 @@ pub enum Expr {
     Bin(&'static str, Box<Expr>, Box<Expr>),
     /// A value selected by control flow at a CFG join. Inputs are deduplicated
     /// and ordered by predecessor block, making the IR deterministic.
-    Phi(Vec<Expr>),
+    ///
+    /// The register carries which value this is, so a join that cannot be turned
+    /// into a conditional still has something true to say. `phi` is a word about
+    /// how the analysis works, not about the program; printing it puts a term
+    /// from the middle of the compiler in front of someone reading C.
+    Phi(Register, Vec<Expr>),
     /// A conditional value `cond ? a : b`, from a `cmov`.
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     /// A resolved (or register-indirect) call with its recovered arguments.
@@ -316,7 +321,7 @@ fn rewrite_stmt_phis(statement: &mut Stmt, condition: &Expr, taken_pos: usize) {
 
 fn rewrite_expr_phis(expr: &mut Expr, condition: &Expr, taken_pos: usize) {
     match expr {
-        Expr::Phi(values) if values.len() == 2 => {
+        Expr::Phi(_, values) if values.len() == 2 => {
             let fall_pos = 1 - taken_pos;
             *expr = Expr::Ternary(
                 Box::new(condition.clone()),
@@ -329,7 +334,7 @@ fn rewrite_expr_phis(expr: &mut Expr, condition: &Expr, taken_pos: usize) {
             rewrite_expr_phis(left, condition, taken_pos);
             rewrite_expr_phis(right, condition, taken_pos);
         }
-        Expr::Phi(values) => values
+        Expr::Phi(_, values) => values
             .iter_mut()
             .for_each(|value| rewrite_expr_phis(value, condition, taken_pos)),
         Expr::Ternary(cond, yes, no) => {
@@ -375,7 +380,7 @@ fn meet_states(
             let value = if values.len() == 1 {
                 values.pop().expect("one merged value")
             } else {
-                Expr::Phi(values)
+                Expr::Phi(register, values)
             };
             out.insert(register, value);
         }
@@ -849,9 +854,19 @@ fn lift_insn(
             None
         }
         Test => {
-            // `test x, x` (the common form) sets the flags from `x`; compare it
-            // against zero.
-            st.cmp = Some((operand(d, st, 0), Expr::Const(0), FlagSrc::Zero));
+            let a = operand(d, st, 0);
+            let b = operand(d, st, 1);
+            // `test x, x` asks whether x is zero, and reads best that way. With
+            // two different operands it is a mask test — the flags come from
+            // `a & b` — and keeping only the first operand states something
+            // else entirely: `test [rcx+0x10], rdx` became `rcx->field_10 == 0`,
+            // which is a different question with a different answer.
+            let lhs = if a == b {
+                a
+            } else {
+                Expr::Bin("&", Box::new(a), Box::new(b))
+            };
+            st.cmp = Some((lhs, Expr::Const(0), FlagSrc::Zero));
             None
         }
         Call => {
@@ -1006,7 +1021,7 @@ fn expr_nodes(e: &Expr) -> usize {
         Expr::Bin(_, l, r) => 1 + expr_nodes(l) + expr_nodes(r),
         Expr::Mem(i) | Expr::Addr(i) => 1 + expr_nodes(i),
         Expr::Ternary(c, a, b) => 1 + expr_nodes(c) + expr_nodes(a) + expr_nodes(b),
-        Expr::Phi(v) => 1 + v.iter().map(expr_nodes).sum::<usize>(),
+        Expr::Phi(_, v) => 1 + v.iter().map(expr_nodes).sum::<usize>(),
         Expr::Call(_, args) => 1 + args.iter().map(expr_nodes).sum::<usize>(),
         Expr::Const(_) | Expr::Reg(..) | Expr::Stack(_) | Expr::Global(_) | Expr::Opaque(_) => 1,
     }
@@ -1140,7 +1155,7 @@ fn is_pure(e: &Expr) -> bool {
         Expr::Const(_) | Expr::Reg(..) | Expr::Stack(_) | Expr::Global(_) => true,
         Expr::Mem(a) | Expr::Addr(a) => is_pure(a),
         Expr::Bin(_, l, r) => is_pure(l) && is_pure(r),
-        Expr::Phi(values) => values.iter().all(is_pure),
+        Expr::Phi(_, values) => values.iter().all(is_pure),
         Expr::Ternary(c, a, b) => is_pure(c) && is_pure(a) && is_pure(b),
         // A call is never pure; an opaque value is not safe to duplicate.
         Expr::Call(..) | Expr::Opaque(_) => false,
@@ -1152,7 +1167,7 @@ fn reads_mem(e: &Expr) -> bool {
         Expr::Mem(_) => true,
         Expr::Addr(a) => reads_mem(a),
         Expr::Bin(_, l, r) => reads_mem(l) || reads_mem(r),
-        Expr::Phi(values) => values.iter().any(reads_mem),
+        Expr::Phi(_, values) => values.iter().any(reads_mem),
         Expr::Ternary(c, a, b) => reads_mem(c) || reads_mem(a) || reads_mem(b),
         Expr::Call(_, args) => args.iter().any(reads_mem),
         Expr::Const(_) | Expr::Reg(..) | Expr::Stack(_) | Expr::Global(_) | Expr::Opaque(_) => {
@@ -1166,7 +1181,7 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Call(..) => true,
         Expr::Mem(a) | Expr::Addr(a) => contains_call(a),
         Expr::Bin(_, l, r) => contains_call(l) || contains_call(r),
-        Expr::Phi(values) => values.iter().any(contains_call),
+        Expr::Phi(_, values) => values.iter().any(contains_call),
         Expr::Ternary(c, a, b) => contains_call(c) || contains_call(a) || contains_call(b),
         _ => false,
     }
@@ -1300,7 +1315,14 @@ fn reads_regs(e: &Expr, live: &mut BTreeSet<Register>) {
             reads_regs(l, live);
             reads_regs(r, live);
         }
-        Expr::Phi(values) => values.iter().for_each(|value| reads_regs(value, live)),
+        // The register counts as read, not only the values merged into it. If
+        // the join cannot be lowered to a conditional it is printed as that
+        // register, and the assignments giving it its values have to still be
+        // there — otherwise the reader is sent to a register nothing ever sets.
+        Expr::Phi(register, values) => {
+            live.insert(*register);
+            values.iter().for_each(|value| reads_regs(value, live));
+        }
         Expr::Ternary(c, a, b) => {
             reads_regs(c, live);
             reads_regs(a, live);
@@ -1338,7 +1360,7 @@ fn fold(e: &mut Expr) {
                 }
             }
         }
-        Expr::Phi(values) => values.iter_mut().for_each(fold),
+        Expr::Phi(_, values) => values.iter_mut().for_each(fold),
         Expr::Ternary(c, a, b) => {
             fold(c);
             fold(a);
@@ -1866,7 +1888,7 @@ fn expr_type(e: &Expr, cx: TypeCx<'_>, return_cache: &mut BTreeMap<String, CType
         Expr::Ternary(_, a, b) => {
             expr_type(a, cx, return_cache).merge(expr_type(b, cx, return_cache))
         }
-        Expr::Phi(values) => values.iter().fold(CType::Unknown, |ty, value| {
+        Expr::Phi(_, values) => values.iter().fold(CType::Unknown, |ty, value| {
             ty.merge(expr_type(value, cx, return_cache))
         }),
         _ => CType::Unknown,
@@ -1885,7 +1907,7 @@ fn expr_type_shallow(e: &Expr, strings: &BTreeMap<u64, Located>) -> CType {
         Expr::Ternary(_, a, b) => {
             expr_type_shallow(a, strings).merge(expr_type_shallow(b, strings))
         }
-        Expr::Phi(values) => values.iter().fold(CType::Unknown, |ty, value| {
+        Expr::Phi(_, values) => values.iter().fold(CType::Unknown, |ty, value| {
             ty.merge(expr_type_shallow(value, strings))
         }),
         _ => CType::Unknown,
@@ -1919,7 +1941,7 @@ fn params_in(e: &Expr, out: &mut BTreeSet<Param>) {
             params_in(a, out);
             params_in(b, out);
         }
-        Expr::Phi(values) => values.iter().for_each(|value| params_in(value, out)),
+        Expr::Phi(_, values) => values.iter().for_each(|value| params_in(value, out)),
         Expr::Ternary(c, a, b) => {
             params_in(c, out);
             params_in(a, out);
@@ -1952,7 +1974,7 @@ fn pointer_params_in(e: &Expr, facts: &mut BTreeMap<Param, CType>) {
             pointer_params_in(a, facts);
             pointer_params_in(b, facts);
         }
-        Expr::Phi(values) => values
+        Expr::Phi(_, values) => values
             .iter()
             .for_each(|value| pointer_params_in(value, facts)),
         Expr::Ternary(c, a, b) => {
@@ -2095,7 +2117,7 @@ fn locals_in_expr(
             locals_in_expr(a, expected, strings, locals, context, parameter_cache);
             locals_in_expr(b, expected, strings, locals, context, parameter_cache);
         }
-        Expr::Phi(values) => {
+        Expr::Phi(_, values) => {
             for value in values {
                 locals_in_expr(value, expected, strings, locals, context, parameter_cache);
             }
@@ -3209,11 +3231,37 @@ fn render_expr(e: &Expr, r: Rx) -> String {
             Expr::Global(va) => global_addr(r, *va),
             _ => format!("&({})", render_expr(a, r)),
         },
-        Expr::Bin(op, l, r2) => format!("{} {op} {}", render_expr(l, r), render_expr(r2, r)),
-        Expr::Phi(values) => {
-            let values: Vec<String> = values.iter().map(|value| render_expr(value, r)).collect();
-            format!("phi({})", values.join(", "))
+        Expr::Bin(op, l, r2) => {
+            // Parenthesised by C's own binding, not by how the tree happens to
+            // be shaped. Nesting was printed flat, so `(a & b) == c` came out as
+            // `a & b == c` — which C reads as `a & (b == c)`, a different
+            // expression with a different value. Pseudocode that cannot be
+            // trusted to mean what it says is worse than none.
+            let outer = precedence(op);
+            let side = |e: &Expr, right: bool| {
+                let text = render_expr(e, r);
+                let inner = match e {
+                    Expr::Bin(op, _, _) => precedence(op),
+                    // A conditional binds looser than every binary operator.
+                    Expr::Ternary(..) => 0,
+                    _ => u8::MAX,
+                };
+                // Equal precedence still needs bracketing on the right: these
+                // operators associate leftwards, so `a - (b - c)` is not
+                // `a - b - c`.
+                if inner < outer || (right && inner == outer) {
+                    format!("({text})")
+                } else {
+                    text
+                }
+            };
+            format!("{} {op} {}", side(l, false), side(r2, true))
         }
+        // A join the structurer could not turn into a conditional. Name the
+        // register the value lives in rather than the analysis term for it: the
+        // reader can follow a register back through the branches above and see
+        // where each value came from, which `phi(0x0, 0x1)` gives no way to do.
+        Expr::Phi(register, _) => render_expr(&Expr::Reg(*register, *register), r),
         Expr::Ternary(c, a, b) => format!(
             "{} ? {} : {}",
             render_expr(c, r),
@@ -3225,6 +3273,28 @@ fn render_expr(e: &Expr, r: Rx) -> String {
             format!("{name}({})", a.join(", "))
         }
         Expr::Opaque(s) => s.clone(),
+    }
+}
+
+/// How tightly a C operator binds. Higher wins; anything unrecognised is
+/// treated as the loosest, so an operator added later is bracketed rather than
+/// silently mis-grouped.
+///
+/// This is C's table, not the lifter's: the output is read as C, so it is C's
+/// rules that decide whether the text means what the tree does. The trap is
+/// `&`, `^` and `|`, which bind *looser* than the comparisons — a mistake old
+/// enough to have its own compiler warning.
+fn precedence(op: &str) -> u8 {
+    match op {
+        "*" => 10,
+        "+" | "-" => 9,
+        "<<" | ">>" => 8,
+        "<" | ">" | "<=" | ">=" => 7,
+        "==" | "!=" => 6,
+        "&" => 5,
+        "^" => 4,
+        "|" => 3,
+        _ => 1,
     }
 }
 
@@ -3931,6 +4001,61 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.text.contains("/*") && l.text.contains("cpuid")));
+    }
+
+    #[test]
+    fn a_mask_test_keeps_both_operands() {
+        // mov rax, [rcx+0x18] ; and rax, rdx ; test rax, rdx ; jne +0 ; ret
+        //
+        // `test a, b` sets the flags from `a & b`. Reading only the first
+        // operand turns a mask test into a null check, which is a different
+        // question about different data.
+        let code = vec![
+            0x48, 0x85, 0xd1, // test rcx, rdx
+            0x75, 0x01, // jne +1
+            0xc3, // ret
+            0xc3, // ret
+        ];
+        let text: String = lines_x64_raw(code)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("rcx & rdx"),
+            "both operands belong in a mask test: {text}"
+        );
+    }
+
+    #[test]
+    fn a_masked_comparison_is_bracketed_as_c_reads_it() {
+        // mov rax, [rcx+0x18] ; and rax, rdx ; cmp rax, [rcx+0x18] ; jne ; ret
+        //
+        // Taken from a real flags check. The comparison is between `field & rdx`
+        // and `field`, and C binds `==` tighter than `&`: printed without
+        // brackets the line reads as `field & (rdx == field)`, which is a
+        // different expression that happens to still compile.
+        let code = vec![
+            0x48, 0x8b, 0x41, 0x18, // mov rax, [rcx+0x18]
+            0x48, 0x21, 0xd0, // and rax, rdx
+            0x48, 0x3b, 0x41, 0x18, // cmp rax, [rcx+0x18]
+            0x75, 0x01, // jne +1
+            0xc3, // ret
+            0xc3, // ret
+        ];
+        let text: String = lines_x64_raw(code)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("(") && text.contains("&"),
+            "the masked side must be bracketed: {text}"
+        );
+        assert!(
+            !text.contains("& rdx =="),
+            "an unbracketed mask reads as a different expression: {text}"
+        );
     }
 
     #[test]
