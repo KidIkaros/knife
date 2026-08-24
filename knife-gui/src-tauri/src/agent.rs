@@ -64,6 +64,12 @@ const MAX_TOOL_CALLS: usize = 32;
 /// The model is told when a result was cut and what to do about it, which is a
 /// better answer than a truncation it cannot see: ask a narrower question.
 const MAX_RESULT_CHARS: usize = 6000;
+
+/// A ceiling on one reply. Providers allow far more than any answer here needs —
+/// this model will write a hundred thousand tokens if asked — and an unbounded
+/// reply is time, budget and context spent on something nobody reads.
+const MAX_REPLY_TOKENS: usize = 4096;
+
 /// Autopilot drives a whole investigation, so it gets a deeper tool budget.
 const AUTOPILOT_ROUNDS: usize = 40;
 
@@ -403,6 +409,98 @@ struct ToolAcc {
 /// Streaming is the point of this pass: a turn can take many seconds of tool
 /// round-trips, and a pane that shows nothing until it finishes reads as broken.
 /// Here the answer types itself and each tool call surfaces as it lands.
+/// The spacing between requests, once we have learned we need one, and when the
+/// last request went out.
+///
+/// The free models this pane is usually pointed at are limited by *requests per
+/// minute*, not by size — around twenty. A turn is one request per round, up to
+/// sixteen for a question and forty for autopilot, and they were issued as fast
+/// as they completed: a single autopilot run is twice the minute's allowance
+/// inside a few seconds. Trimming what each request carried, which the previous
+/// pass did, does not help with a limit that counts requests.
+///
+/// So the pane learns. It runs at full speed until something says no, then
+/// spaces every request after it — for the rest of the session, since the limit
+/// is a property of the key and the model rather than of one turn. Nothing is
+/// paced until a limit is actually met, so a paid model never pays for this.
+static PACE: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+static LAST_SENT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Twenty requests a minute is the usual free-tier allowance; three seconds
+/// between them keeps a little room under it.
+const PACED_INTERVAL: Duration = Duration::from_millis(3200);
+
+/// Wait until enough time has passed since the last request.
+async fn hold_the_pace() {
+    let gap = {
+        let pace = *PACE.lock().unwrap();
+        let last = *LAST_SENT.lock().unwrap();
+        match (pace, last) {
+            (Some(p), Some(t)) => p.checked_sub(t.elapsed()),
+            _ => None,
+        }
+    };
+    if let Some(gap) = gap {
+        tokio::time::sleep(gap).await;
+    }
+    *LAST_SENT.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// One HTTP client for the process.
+///
+/// A fresh client per turn is a fresh connection pool, so every round paid for a
+/// new TLS handshake to a host we had just finished talking to.
+fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// Keep the conversation from growing for as long as the session lasts.
+///
+/// Every turn sends the whole history back, so an afternoon of questions builds
+/// a request that carries every tool result the model has ever been shown. It
+/// grows until it passes the model's context, and costs the whole way there.
+///
+/// Whole exchanges are dropped, oldest first, never part of one: a tool result
+/// separated from the call it answers is a malformed conversation and the API
+/// refuses it. The system prompt always stays — it is what tells the model what
+/// it is looking at.
+fn trim_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    // Characters rather than tokens: the point is to stop unbounded growth, and
+    // a rough measure does that as well as an exact one would.
+    const BUDGET: usize = 48_000;
+    let weigh = |m: &ChatMessage| {
+        m.content.as_deref().map_or(0, str::len)
+            + m.tool_calls.as_ref().map_or(0, |t| t.to_string().len())
+            + 64
+    };
+    if messages.iter().map(weigh).sum::<usize>() <= BUDGET {
+        return messages;
+    }
+
+    let mut rest = messages;
+    let system = (rest.first().map(|m| m.role.as_str()) == Some("system")).then(|| rest.remove(0));
+
+    // A turn begins at a question, so those are the only safe places to cut.
+    let starts: Vec<usize> = rest
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user")
+        .map(|(i, _)| i)
+        .collect();
+    let keep_from = starts
+        .iter()
+        .copied()
+        .find(|&s| rest[s..].iter().map(weigh).sum::<usize>() <= BUDGET)
+        .or_else(|| starts.last().copied())
+        .unwrap_or(0);
+
+    let mut out = Vec::new();
+    out.extend(system);
+    out.extend(rest.drain(keep_from..));
+    out
+}
+
 /// Whether waiting and asking again could plausibly work.
 ///
 /// A rate limit and a gateway hiccup are conditions of the moment; a bad key or
@@ -442,6 +540,7 @@ async fn send_with_retry(
         if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(anyhow!("stopped"));
         }
+        hold_the_pace().await;
         let sent = client
             .post(ENDPOINT)
             .bearer_auth(key)
@@ -456,6 +555,20 @@ async fn send_with_retry(
             Ok(resp) if worth_retrying(resp.status()) && attempt < MAX_ATTEMPTS => {
                 let status = resp.status();
                 let asked = retry_after(&resp);
+                // A refusal for going too fast is the signal to slow down for
+                // good, not just to wait out this one. Without it every later
+                // round runs headlong into the same wall and the retries
+                // themselves become the thing exhausting the allowance.
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let mut pace = PACE.lock().unwrap();
+                    if pace.is_none() {
+                        *pace = Some(PACED_INTERVAL);
+                        emit(
+                            app,
+                            json!({ "kind": "paced", "seconds": PACED_INTERVAL.as_secs_f64() }),
+                        );
+                    }
+                }
                 last = format!("HTTP {status}");
                 asked.unwrap_or(wait)
             }
@@ -466,9 +579,16 @@ async fn send_with_retry(
                 // Say which wall was hit. "Too many requests" reads as a fault
                 // in knife unless it also says the model is the thing limiting.
                 return Err(if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // Two different walls wear the same status, and the answer
+                    // is opposite: one wants patience, the other cannot be
+                    // waited out at all. Saying which saves the analyst from
+                    // sitting there retrying something already spent.
                     anyhow!(
-                        "{detail}\n\nThis model is rate limiting us. Give it a moment, \
-                         or choose another model."
+                        "{detail}\n\nA free model allows a small number of requests per \
+                         minute and a limited number per day. Requests are now being spaced \
+                         out, so a per-minute limit should clear on its own. If the daily \
+                         allowance is gone, waiting will not help — choose a different model, \
+                         or add credit to the account the key belongs to."
                     )
                 } else {
                     anyhow!("{detail}").context(format!("HTTP {status}"))
@@ -654,7 +774,7 @@ async fn agent_turn(
             name: None,
         });
     } else {
-        messages.extend(history);
+        messages.extend(trim_history(history));
     }
     messages.push(ChatMessage {
         role: "user".into(),
@@ -665,7 +785,7 @@ async fn agent_turn(
     });
 
     CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
-    let client = reqwest::Client::new();
+    let client = http();
     let mut steps: Vec<AgentStep> = Vec::new();
     let mut suggestions: Vec<Suggestion> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -684,8 +804,11 @@ async fn agent_turn(
             "messages": messages,
             "tools": tool_schema(),
             "stream": true,
+            // Without a ceiling a reply may run to the provider's own, which on
+            // this model is a hundred thousand tokens of answer nobody asked for.
+            "max_tokens": MAX_REPLY_TOKENS,
         });
-        let (content, tools) = stream_once(&client, &key, &app, body).await?;
+        let (content, tools) = stream_once(client, &key, &app, body).await?;
 
         let tool_calls_json = (!tools.is_empty()).then(|| {
             Value::Array(
@@ -857,9 +980,14 @@ async fn agent_turn(
         tool_call_id: None,
         name: None,
     });
-    let body =
-        json!({ "model": model, "messages": messages, "tool_choice": "none", "stream": true });
-    let (reply, _) = stream_once(&client, &key, &app, body).await?;
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "tool_choice": "none",
+        "stream": true,
+        "max_tokens": MAX_REPLY_TOKENS,
+    });
+    let (reply, _) = stream_once(client, &key, &app, body).await?;
     emit(&app, json!({ "kind": "done" }));
     messages.push(ChatMessage {
         role: "assistant".into(),

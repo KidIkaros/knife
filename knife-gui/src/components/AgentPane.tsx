@@ -30,6 +30,7 @@ type AgentEvent =
   | { kind: "suggestion"; suggestion: Suggestion }
   | { kind: "applied" }
   | { kind: "retry"; attempt: number; of: number; seconds: number; why: string }
+  | { kind: "paced"; seconds: number }
   | { kind: "done" };
 
 /// The models offered in the picker.
@@ -191,6 +192,10 @@ export function AgentPane({
               ...l,
               status: `rate limited — retrying in ${ev.seconds}s (${ev.attempt}/${ev.of})`,
             };
+          // Said once, when the pane decides to slow down for the rest of the
+          // session. Otherwise the turn just appears to get slower for no reason.
+          case "paced":
+            return { ...l, status: `pacing requests for this model (${ev.seconds}s apart)` };
           case "done":
             return { ...l, status: "" };
           default:
