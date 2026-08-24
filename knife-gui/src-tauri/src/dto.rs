@@ -426,8 +426,11 @@ pub struct CfgNode {
     pub addr: String,
     /// "entry" or "block".
     pub kind: &'static str,
-    /// Rendered instructions, so a card shows real code rather than a count.
-    pub insns: Vec<String>,
+    /// The block's instructions as the listing renders them — mnemonic and
+    /// operands apart, the resolved callee or string literal alongside, and the
+    /// target to follow. A card shows the same code the disassembly does, rather
+    /// than a flattened line of text.
+    pub insns: Vec<LineDto>,
     pub count: usize,
     pub bytes: u64,
 }

@@ -1286,6 +1286,41 @@ body {
   font-size: 10.5px;
 }
 
+/* The listing's colours, in SVG terms — text there takes `color`, here it takes
+   `fill`, so the classes cannot simply be shared. The tokens are the same ones,
+   so a block reads like the disassembly of the same address. */
+.block .g-mnem {
+  fill: var(--accent);
+}
+
+.block .g-ops {
+  fill: var(--text);
+}
+
+.block .g-target {
+  fill: var(--accent-hi);
+}
+
+.block .g-annot {
+  fill: var(--faint);
+}
+
+.block .g-annot.note {
+  fill: var(--amber);
+}
+
+.block .g-annot.symbol {
+  fill: var(--mint);
+}
+
+.block .g-annot.text {
+  fill: var(--mint);
+}
+
+.block .g-annot.local {
+  fill: var(--faint);
+}
+
 .block .bmore {
   fill: var(--faint);
   font-size: 10px;

@@ -776,6 +776,26 @@ pub fn cfg(state: State<AppState>, selector: String) -> Result<CfgDto, String> {
             // ones point backwards into a loop); the block bodies come straight
             // off the function so a card can show real instructions.
             let graph = graphs::cfg(f);
+
+            // The same lines the disassembly view shows, keyed by address. The
+            // cards used to be filled with `i.text(..)`, which is the bare
+            // instruction and nothing else — no resolved callee, no string
+            // behind a pointer, no note of yours, and no target to click. All of
+            // that is what makes a block readable, and `listing::function`
+            // already works it out; there was no reason for the graph to be
+            // shown less than the listing is.
+            let mut body: std::collections::BTreeMap<u64, LineDto> =
+                std::collections::BTreeMap::new();
+            for line in
+                listing::function(an, f, &l.session.db, l.base, &l.strings, l.hints.as_ref())
+            {
+                // `loc_` labels are dropped: the card's own header already says
+                // where the block starts.
+                if matches!(line, reknife::listing::Line::Insn { .. }) {
+                    body.insert(line.addr(), LineDto::from(&line));
+                }
+            }
+
             let nodes = f
                 .blocks
                 .iter()
@@ -783,7 +803,29 @@ pub fn cfg(state: State<AppState>, selector: String) -> Result<CfgDto, String> {
                     id: hex(b.start),
                     addr: hex(b.start),
                     kind: if b.start == f.addr { "entry" } else { "block" },
-                    insns: b.insns.iter().map(|i| i.text(an.bits, an.arch)).collect(),
+                    insns: b
+                        .insns
+                        .iter()
+                        .map(|i| {
+                            // A block is never left empty: if the listing had
+                            // nothing for an address, the plain text still says
+                            // what the instruction is.
+                            body.remove(&i.addr).unwrap_or_else(|| {
+                                let text = i.text(an.bits, an.arch);
+                                let (mnemonic, operands) = match text.split_once(' ') {
+                                    Some((m, r)) => (m.to_string(), r.to_string()),
+                                    None => (text.clone(), String::new()),
+                                };
+                                LineDto::Insn {
+                                    addr: hex(i.addr),
+                                    mnemonic,
+                                    operands,
+                                    annot: None,
+                                    target: None,
+                                }
+                            })
+                        })
+                        .collect(),
                     count: b.insns.len(),
                     bytes: b.end.saturating_sub(b.start),
                 })
@@ -865,7 +907,12 @@ pub fn call_graph(
                     id: hex(n.address),
                     addr: hex(n.address),
                     kind: if n.address == f.addr { "entry" } else { n.kind },
-                    insns: vec![n.label.clone()],
+                    // A call-graph card is a whole function, so its one line is
+                    // the name rather than an instruction.
+                    insns: vec![LineDto::Data {
+                        addr: hex(n.address),
+                        text: n.label.clone(),
+                    }],
                     count: by_addr.get(&n.address).map(|x| x.blocks.len()).unwrap_or(0),
                     bytes: by_addr.get(&n.address).map(|x| x.size).unwrap_or(0),
                 })

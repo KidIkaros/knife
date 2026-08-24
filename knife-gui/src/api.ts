@@ -171,7 +171,9 @@ export interface CfgNode {
   // The card model serves both graphs: blocks in a CFG, functions and
   // imports in a call closure.
   kind: "entry" | "block" | "function" | "import" | "external";
-  insns: string[];
+  /// The block's code as the listing renders it, so a card reads the same way
+  /// the disassembly does. A call-graph card carries one `data` line: its name.
+  insns: Line[];
   count: number;
   bytes: number;
 }
@@ -179,7 +181,8 @@ export interface CfgNode {
 export interface CfgEdge {
   from: string;
   to: string;
-  kind: "true" | "false" | "flow";
+  /// "call" is the call closure's edge; the other three are control flow.
+  kind: "true" | "false" | "flow" | "call";
   back: boolean;
 }
 
