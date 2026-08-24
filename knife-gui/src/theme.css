@@ -2,26 +2,45 @@
    in icons/source.png, and consistent with the printed reports, whose accent
    has always been red (src/output.rs).
 
-   Colour is tied to meaning here and that survives the retheme: red chrome is
-   the brand, but mint / amber / critical keep their jobs on mitigation state,
-   finding severity, and graph edges. Critical stays the brighter red so a
-   severity marker never reads as ordinary chrome sitting beside it. */
+   Red is the brand and it stays, but it earns its place rather than covering
+   everything. It marks what is knife's own — the wordmark, the active tab, the
+   rail — and what is genuinely alarming: a critical, a high-severity finding.
+   It is no longer what an ordinary instruction is painted in.
+
+   The greys underneath are neutral now. They used to carry a red tint of their
+   own, so every panel, border and selection pulled the whole window warm and
+   the accent had nothing to stand out against.
+
+   Colour still means something: mint / amber / critical keep their jobs on
+   mitigation state, finding severity, and graph edges. */
 :root {
   --accent: #ff2e45;
   --accent-hi: #ff667a;
   --accent-glow: rgba(255, 46, 69, 0.5);
   --critical: #ff5b60;
-  --muted: #a7a3a3;
-  --faint: #6a6666;
+  --muted: #a0a0a2;
+  --faint: #6f6f71;
   --mint: #3dffab;
   --amber: #ffd23d;
-  --canvas: #0b0a0a;
-  --panel: #191717;
-  --panel-2: #131111;
-  --sel-bg: #3a2528;
-  --sel-fg: #f2f0f0;
-  --text: #e4e2e2;
-  --border: #322f30;
+  --canvas: #131315;
+  --panel: #1c1c1e;
+  --panel-2: #171719;
+  --sel-bg: #2b2f3a;
+  --sel-fg: #f3f3f5;
+  --text: #dedee0;
+  --border: #303032;
+
+  /* Syntax roles. A listing reads by contrast between its parts, not by being
+     loud: the mnemonic is the least interesting thing on the line and used to
+     be the brightest, painted in the brand red. It is plain now, and the colour
+     goes to what you actually scan for — the name of what a call reaches, the
+     literal behind a pointer, a number that is not an address. */
+  --syn-mnem: #ccccce;
+  --syn-ops: #a9a9ab;
+  --syn-sym: #6fb0e0;
+  --syn-num: #d8a657;
+  --syn-comment: #7f8f86;
+
   --mono: "Cascadia Mono", "JetBrains Mono", "Consolas", ui-monospace, monospace;
 }
 
@@ -61,7 +80,7 @@ body {
   align-items: center;
   gap: 14px;
   padding: 0 12px;
-  background: linear-gradient(180deg, #181616, #0d0c0c);
+  background: linear-gradient(180deg, #171719, #0c0c0e);
   border-bottom: 1px solid var(--border);
 }
 
@@ -131,7 +150,7 @@ body {
   padding: 0 3px;
   border-radius: 7px;
   background: var(--accent);
-  color: #f5eeee;
+  color: #f0f0f2;
   font-size: 9px;
   line-height: 13px;
   font-weight: 700;
@@ -147,12 +166,12 @@ body {
 
 .rail button:hover {
   color: var(--muted);
-  background: #211d1e;
+  background: #1f1f21;
 }
 
 .rail button.active {
   color: var(--accent);
-  background: #2a1e20;
+  background: #232325;
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -177,7 +196,7 @@ body {
   color: var(--accent);
   font-size: 12px;
   border-bottom: 1px solid var(--border);
-  background: #141313;
+  background: #131315;
 }
 
 .panel-head .count {
@@ -220,7 +239,7 @@ body {
 }
 
 .panel-head .chip.on {
-  color: #f5eeee;
+  color: #f0f0f2;
   background: var(--accent);
   border-color: var(--accent);
 }
@@ -231,7 +250,7 @@ body {
   width: 64px;
   height: 6px;
   margin-right: 8px;
-  background: #211d1e;
+  background: #1f1f21;
   border-radius: 3px;
   overflow: hidden;
   vertical-align: middle;
@@ -275,7 +294,7 @@ body {
 }
 
 .lintriage .tsep {
-  color: #3a3536;
+  color: #373739;
 }
 
 .lintriage .tflag {
@@ -460,7 +479,7 @@ body {
   min-width: 460px;
   max-width: 640px;
   padding: 8px 10px;
-  background: #161415;
+  background: #151517;
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
@@ -539,7 +558,7 @@ body {
   max-height: calc(100vh - 120px);
   overflow: auto;
   padding: 12px 14px;
-  background: #161415;
+  background: #151517;
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 12px 40px rgb(0 0 0 / 50%);
@@ -594,7 +613,7 @@ body {
   padding: 0 5px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: #1d1a1b;
+  background: #1b1b1d;
   color: var(--text);
   font-family: inherit;
   font-size: 10.5px;
@@ -637,7 +656,7 @@ body {
 .filter input,
 .inline-input {
   width: 100%;
-  background: #100f0f;
+  background: #0f0f11;
   border: 1px solid var(--border);
   color: var(--text);
   font-family: var(--mono);
@@ -669,7 +688,7 @@ body {
 }
 
 .fn-row:hover {
-  background: #201c1d;
+  background: #1e1e20;
 }
 
 .fn-row.sel {
@@ -718,7 +737,7 @@ body {
   padding: 0 8px;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  background: #141313;
+  background: #131315;
 }
 
 .tabs .tab {
@@ -761,8 +780,12 @@ body {
   min-width: 0;
 }
 
-.tabs button.act {
-  background: #2a1e20;
+/* A small pill button, wherever one is needed. This used to be written as
+   `.tabs button.act`, so the same class in any other bar — the linear sweep's
+   own controls — matched nothing and fell back to the browser's default button,
+   which is a light grey box in the wrong font. */
+button.act {
+  background: var(--panel);
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -772,9 +795,14 @@ body {
   cursor: pointer;
 }
 
-.tabs button.act:hover {
-  color: var(--accent);
-  border-color: var(--accent);
+button.act:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--faint);
+}
+
+button.act:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .code {
@@ -811,22 +839,22 @@ body {
 }
 
 .code .mnem {
-  color: var(--accent);
+  color: var(--syn-mnem);
   min-width: 56px;
 }
 
 .code .ops {
-  color: var(--text);
+  color: var(--syn-ops);
 }
 
 .code .target {
-  color: var(--accent);
+  color: var(--syn-sym);
   cursor: pointer;
   text-decoration: underline dotted transparent;
 }
 
 .code .target:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--syn-sym);
 }
 
 .code .label {
@@ -834,7 +862,7 @@ body {
 }
 
 .code .annot {
-  color: var(--faint);
+  color: var(--syn-comment);
 }
 
 .code .annot.note {
@@ -842,7 +870,7 @@ body {
 }
 
 .code .annot.symbol {
-  color: var(--accent);
+  color: var(--syn-sym);
 }
 
 .code .annot.text {
@@ -886,7 +914,7 @@ body {
 }
 
 .xref-row:hover {
-  background: #201c1d;
+  background: #1e1e20;
 }
 
 .xref-row .k {
@@ -912,7 +940,7 @@ body {
 }
 
 .seg button.active {
-  background: #2a1e20;
+  background: #232325;
   color: var(--accent);
 }
 
@@ -920,11 +948,11 @@ body {
 .finding {
   padding: 4px 10px;
   cursor: pointer;
-  border-bottom: 1px solid #191717;
+  border-bottom: 1px solid #18181a;
 }
 
 .finding:hover {
-  background: #201c1d;
+  background: #1e1e20;
 }
 
 .finding.sel {
@@ -994,7 +1022,7 @@ body {
 
 .fchip.on {
   border-color: var(--accent);
-  background: #2a1e20;
+  background: #232325;
 }
 
 .finding .pat {
@@ -1143,7 +1171,7 @@ body {
 
 .recent:hover {
   color: var(--accent-hi);
-  background: #211d1e;
+  background: #1f1f21;
 }
 
 .welcome .big {
@@ -1157,7 +1185,7 @@ body {
 }
 
 .btn {
-  background: #2a1e20;
+  background: #232325;
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1183,11 +1211,11 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #332f30;
+  background: #313133;
   border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #413c3d;
+  background: #3e3e40;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -1200,7 +1228,7 @@ body {
   min-height: 0;
   overflow: hidden;
   background:
-    radial-gradient(circle at 1px 1px, #221f20 1px, transparent 0) 0 0 / 24px 24px,
+    radial-gradient(circle at 1px 1px, #202022 1px, transparent 0) 0 0 / 24px 24px,
     var(--panel);
 }
 
@@ -1230,7 +1258,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: #181616cc;
+  background: #171719cc;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 3px 6px;
@@ -1251,7 +1279,7 @@ body {
 
 .graph-tools button:hover {
   color: var(--accent);
-  background: #2a2426;
+  background: #272729;
 }
 
 .graph-tools .zoom {
@@ -1269,7 +1297,7 @@ body {
 }
 
 .block rect {
-  fill: #1a1818;
+  fill: #19191b;
   stroke: var(--border);
   stroke-width: 1.5;
 }
@@ -1284,7 +1312,7 @@ body {
 
 .block.sel rect {
   stroke: var(--accent);
-  fill: #241d1f;
+  fill: #202022;
 }
 
 .block text {
@@ -1294,7 +1322,7 @@ body {
 }
 
 .block .bhead {
-  fill: var(--accent);
+  fill: var(--muted);
   font-weight: 700;
 }
 
@@ -1304,7 +1332,7 @@ body {
 }
 
 .block .bline {
-  fill: var(--muted);
+  fill: var(--syn-ops);
   font-size: 10.5px;
 }
 
@@ -1312,19 +1340,19 @@ body {
    `fill`, so the classes cannot simply be shared. The tokens are the same ones,
    so a block reads like the disassembly of the same address. */
 .block .g-mnem {
-  fill: var(--accent);
+  fill: var(--syn-mnem);
 }
 
 .block .g-ops {
-  fill: var(--text);
+  fill: var(--syn-ops);
 }
 
 .block .g-target {
-  fill: var(--accent-hi);
+  fill: var(--syn-sym);
 }
 
 .block .g-annot {
-  fill: var(--faint);
+  fill: var(--syn-comment);
 }
 
 .block .g-annot.note {
@@ -1332,7 +1360,7 @@ body {
 }
 
 .block .g-annot.symbol {
-  fill: var(--mint);
+  fill: var(--syn-sym);
 }
 
 .block .g-annot.text {
@@ -1357,7 +1385,7 @@ body {
 .overlay {
   position: fixed;
   inset: 0;
-  background: #070606cc;
+  background: #060608cc;
   backdrop-filter: blur(2px);
   z-index: 50;
   display: flex;
@@ -1380,7 +1408,7 @@ body {
 .palette-input {
   border: 0;
   border-bottom: 1px solid var(--border);
-  background: #100f0f;
+  background: #0f0f11;
   color: var(--text);
   font-family: var(--mono);
   font-size: 14px;
@@ -1445,7 +1473,7 @@ body {
   gap: 16px;
   padding: 5px 14px;
   border-top: 1px solid var(--border);
-  background: #141313;
+  background: #131315;
   color: var(--faint);
   font-size: 11px;
 }
@@ -1458,7 +1486,7 @@ body {
   align-items: center;
   gap: 12px;
   padding: 0 12px;
-  background: #121111;
+  background: #111113;
   border-top: 1px solid var(--border);
   font-size: 11px;
   white-space: nowrap;
@@ -1559,7 +1587,7 @@ body {
   gap: 8px;
   padding: 6px 12px;
   border-top: 1px solid var(--border);
-  background: #100f0f;
+  background: #0f0f11;
 }
 
 .cin .prompt {
@@ -1638,7 +1666,7 @@ body {
   color: var(--amber);
   font-size: 11px;
   letter-spacing: 0.4px;
-  background: #181616;
+  background: #171719;
   border-top: 1px solid var(--border);
 }
 
@@ -1696,7 +1724,7 @@ body {
   align-items: stretch;
   gap: 1px;
   padding: 0 8px;
-  background: #0d0c0c;
+  background: #0c0c0e;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
 }
@@ -1716,7 +1744,7 @@ body {
 
 .ttab:hover {
   color: var(--muted);
-  background: #1c1919;
+  background: #1a1a1c;
 }
 
 .ttab.active {
@@ -1792,7 +1820,7 @@ body {
   gap: 8px;
   padding: 5px 10px;
   border-bottom: 1px solid var(--border);
-  background: #141313;
+  background: #131315;
 }
 
 .findbar .inline-input {
@@ -1923,7 +1951,7 @@ body {
 /* ── staged patches ───────────────────────────────────────────────────── */
 .patch {
   padding: 6px 10px;
-  border-bottom: 1px solid #191717;
+  border-bottom: 1px solid #18181a;
 }
 
 .patch .top {
@@ -1993,7 +2021,7 @@ body {
 }
 
 .drow:hover {
-  background: #201c1d;
+  background: #1e1e20;
 }
 
 .drow .dname {
@@ -2162,7 +2190,7 @@ body {
   font-size: 12px;
   white-space: normal;
   line-height: 1.7;
-  border-bottom: 1px solid #191717;
+  border-bottom: 1px solid #18181a;
 }
 
 .pathrow .phop {
@@ -2189,7 +2217,7 @@ body {
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
   border-left: 3px solid var(--faint);
-  background: #141212;
+  background: #131315;
   padding: 6px 12px 8px;
   font-size: 12px;
 }
@@ -2517,7 +2545,7 @@ body {
   padding: 1px 7px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: #131111;
+  background: #121214;
   max-width: 100%;
 }
 
@@ -2716,7 +2744,7 @@ body {
 }
 
 .stopbtn:hover {
-  background: #241417;
+  background: #1a1a1c;
 }
 
 /* ── agent suggestions ────────────────────────────────────────────────── */
@@ -2735,7 +2763,7 @@ body {
   border: 1px solid var(--border);
   border-left: 2px solid var(--amber);
   border-radius: 6px;
-  background: #17130d;
+  background: #121214;
   font-size: 12px;
 }
 
@@ -2755,7 +2783,7 @@ body {
 .sug-apply {
   margin-left: auto;
   background: var(--accent);
-  color: #0b0a0a;
+  color: #0a0a0c;
   border: 0;
   border-radius: 5px;
   padding: 2px 12px;
@@ -2821,7 +2849,7 @@ body {
 }
 
 .md-code {
-  background: #0d0c0c;
+  background: #0c0c0e;
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0 4px;
@@ -2830,7 +2858,7 @@ body {
 }
 
 .md-pre {
-  background: #0d0c0c;
+  background: #0c0c0e;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
@@ -2866,7 +2894,7 @@ body {
 }
 
 .md-table tr:nth-child(even) td {
-  background: #131111;
+  background: #121214;
 }
 
 /* Live reply streams as plain text (fast); it becomes rendered markdown once
@@ -2917,7 +2945,7 @@ body {
 
 .code .ln.danger.s3 {
   box-shadow: inset 2px 0 0 var(--critical);
-  background: #1a1012;
+  background: #141416;
 }
 
 .code .ln.danger.s2 {
@@ -2946,7 +2974,7 @@ body {
 }
 
 .danger-flag:hover {
-  background: #241417;
+  background: #1a1a1c;
 }
 
 .code.decompiling {
@@ -2974,7 +3002,7 @@ body {
 }
 
 .kprim-flag:hover {
-  background: #2a1e20;
+  background: #232325;
 }
 
 /* ── autopilot ────────────────────────────────────────────────────────── */
@@ -2983,7 +3011,7 @@ body {
   border-color: var(--accent);
 }
 .autopilot-btn:hover {
-  background: #2a1e20;
+  background: #232325;
 }
 
 .autopilot-cta {
@@ -2994,7 +3022,7 @@ body {
   margin-top: 14px;
   padding: 10px 14px;
   width: 100%;
-  background: linear-gradient(180deg, #241417, #1a0f11);
+  background: linear-gradient(180deg, #1a1a1c, #131315);
   border: 1px solid var(--accent);
   border-radius: 8px;
   color: var(--accent);
@@ -3005,7 +3033,7 @@ body {
   text-align: left;
 }
 .autopilot-cta:hover {
-  background: linear-gradient(180deg, #2e181c, #201013);
+  background: linear-gradient(180deg, #212123, #161618);
 }
 .autopilot-cta .sub {
   color: var(--faint);
@@ -3039,7 +3067,7 @@ body {
   margin-top: 8px;
   border: 1px solid var(--mint);
   border-radius: 8px;
-  background: #0e1613;
+  background: #121214;
   padding: 6px 8px;
 }
 .applied-head {
@@ -3179,7 +3207,7 @@ body {
   gap: 14px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: #141313;
+  background: #131315;
   flex: 0 0 auto;
   flex-wrap: wrap;
 }
@@ -3251,7 +3279,7 @@ body {
   cursor: pointer;
 }
 .crit-row:hover {
-  background: #161414;
+  background: #151517;
 }
 .crit-row.s3 {
   border-left-color: var(--critical);
@@ -3272,11 +3300,11 @@ body {
   padding: 2px 0;
 }
 .crit-sev.s3 {
-  color: #0b0a0a;
+  color: #0a0a0c;
   background: var(--critical);
 }
 .crit-sev.s2 {
-  color: #0b0a0a;
+  color: #0a0a0c;
   background: var(--amber);
 }
 .crit-sev.s1 {
@@ -3364,7 +3392,7 @@ body {
   color: var(--muted);
 }
 .tab-badge.hi {
-  color: #0b0a0a;
+  color: #0a0a0c;
   background: var(--critical);
   border-color: var(--critical);
 }
