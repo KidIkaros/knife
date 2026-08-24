@@ -2586,6 +2586,31 @@ button.act:disabled {
   font-size: 11px;
   padding: 2px 6px;
   outline: none;
+  cursor: pointer;
+}
+
+/* The list itself is drawn by the platform, which does not inherit the page. */
+.agent-model option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.agent-model:hover {
+  color: var(--text);
+  border-color: var(--faint);
+}
+
+/* Shown only while an id outside the list is being typed. */
+.agent-model-id {
+  width: 190px;
+  background: var(--panel-2);
+  border: 1px solid var(--faint);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  outline: none;
 }
 
 .agent-model:focus {

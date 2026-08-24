@@ -24,6 +24,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::time::Duration;
 use tauri::{Emitter, State};
 
 const SERVICE: &str = "knife-gui";
@@ -40,12 +41,19 @@ static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// one, follow a call, check what reaches it — so this is not a tight budget.
 /// What matters more is what happens at the end of it: see `force_answer`.
 const MAX_TOOL_ROUNDS: usize = 16;
+
+/// How many times one request is attempted before the turn gives up. The models
+/// this is most often pointed at are rate limited as a matter of course, so a
+/// first refusal says nothing except that we asked too soon.
+const MAX_ATTEMPTS: u32 = 4;
+
+/// A ceiling on the tool calls one reply may open. The index comes from the
+/// model, and a vector grown to meet it is memory a reply gets to choose.
+const MAX_TOOL_CALLS: usize = 32;
 /// Autopilot drives a whole investigation, so it gets a deeper tool budget.
 const AUTOPILOT_ROUNDS: usize = 40;
 
-/// Rows returned to the model from a listing tool. Enough to reason about,
-/// bounded so a large function cannot blow the context in one call.
-
+/// One message in the conversation, in the shape the API expects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -365,27 +373,107 @@ struct ToolAcc {
 /// Streaming is the point of this pass: a turn can take many seconds of tool
 /// round-trips, and a pane that shows nothing until it finishes reads as broken.
 /// Here the answer types itself and each tool call surfaces as it lands.
+/// Whether waiting and asking again could plausibly work.
+///
+/// A rate limit and a gateway hiccup are conditions of the moment; a bad key or
+/// an unknown model will fail the same way however long we wait, and retrying
+/// those just makes the pane hang before showing the same message.
+fn worth_retrying(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// How long the server asked us to wait, if it said.
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    let raw = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    // Seconds is the form every provider actually sends.
+    raw.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Post the request, waiting out the conditions that pass.
+///
+/// There was no retry here at all, so a single rate-limit reply ended the turn
+/// with an error — and the free and stealth models this is most often pointed at
+/// are rate limited as a matter of course, which made the pane look broken when
+/// nothing was wrong except that we asked too quickly. The wait doubles each
+/// time, and the server's own `Retry-After` wins when it sends one.
+async fn send_with_retry(
+    client: &reqwest::Client,
+    key: &str,
+    app: &tauri::AppHandle,
+    body: &Value,
+) -> Result<reqwest::Response> {
+    let mut wait = Duration::from_millis(800);
+    let mut last: String = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(anyhow!("stopped"));
+        }
+        let sent = client
+            .post(ENDPOINT)
+            .bearer_auth(key)
+            .header("HTTP-Referer", "https://github.com/bl4ckr0ss3/knife")
+            .header("X-Title", "knife")
+            .json(body)
+            .send()
+            .await;
+
+        let pause = match sent {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) if worth_retrying(resp.status()) && attempt < MAX_ATTEMPTS => {
+                let status = resp.status();
+                let asked = retry_after(&resp);
+                last = format!("HTTP {status}");
+                asked.unwrap_or(wait)
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let detail = error_message(&text);
+                // Say which wall was hit. "Too many requests" reads as a fault
+                // in knife unless it also says the model is the thing limiting.
+                return Err(if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    anyhow!(
+                        "{detail}\n\nThis model is rate limiting us. Give it a moment, \
+                         or choose another model."
+                    )
+                } else {
+                    anyhow!("{detail}").context(format!("HTTP {status}"))
+                });
+            }
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                last = format!("{e}");
+                wait
+            }
+            Err(e) => return Err(anyhow!("request failed: {e}")),
+        };
+
+        emit(
+            app,
+            json!({
+                "kind": "retry",
+                "attempt": attempt,
+                "of": MAX_ATTEMPTS,
+                "seconds": pause.as_secs_f64().ceil() as u64,
+                "why": last,
+            }),
+        );
+        tokio::time::sleep(pause).await;
+        wait = (wait * 2).min(Duration::from_secs(20));
+    }
+    Err(anyhow!("gave up after {MAX_ATTEMPTS} attempts: {last}"))
+}
+
 async fn stream_once(
     client: &reqwest::Client,
     key: &str,
     app: &tauri::AppHandle,
     body: Value,
 ) -> Result<(String, Vec<ToolAcc>)> {
-    let resp = client
-        .post(ENDPOINT)
-        .bearer_auth(key)
-        .header("HTTP-Referer", "https://github.com/bl4ckr0ss3/knife")
-        .header("X-Title", "knife")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("{}", error_message(&text)).context(format!("HTTP {status}")));
-    }
+    let resp = send_with_retry(client, key, app, &body).await?;
 
     let mut stream = resp.bytes_stream();
     // Bytes, not text. A chunk boundary falls wherever the network puts it, which
@@ -443,6 +531,12 @@ async fn stream_once(
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for tc in calls {
                     let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    // The index is whatever the reply says it is, and it decided
+                    // how far this vector grew. A reply asking for call number
+                    // four billion is not a reply worth allocating for.
+                    if idx >= MAX_TOOL_CALLS {
+                        continue;
+                    }
                     while tools.len() <= idx {
                         tools.push(ToolAcc::default());
                     }

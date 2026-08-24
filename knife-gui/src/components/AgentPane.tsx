@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type Applied, type AgentStep, type ChatMessage, type Suggestion } from "../api";
 import { Markdown } from "./Markdown";
@@ -29,7 +29,29 @@ type AgentEvent =
   | { kind: "result"; tool: string; preview: string }
   | { kind: "suggestion"; suggestion: Suggestion }
   | { kind: "applied" }
+  | { kind: "retry"; attempt: number; of: number; seconds: number; why: string }
   | { kind: "done" };
+
+/// The models offered in the picker.
+///
+/// A short list, not a catalogue: OpenRouter carries hundreds and almost none of
+/// them are worth pointing at a disassembler. What this work needs is a long
+/// context — a decompiled function and its callers add up quickly — and tool
+/// calling that holds together over a dozen rounds. The stealth entries are free
+/// and rate limited hard, which is the trade being made when one is chosen.
+/// Anything not listed can still be typed in.
+const MODELS: Array<{ id: string; label: string; note: string }> = [
+  { id: "stealth/ox-alpha", label: "ox-alpha", note: "stealth · free · rate limited" },
+  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", note: "strong tool use" },
+  { id: "anthropic/claude-3.5-haiku", label: "Claude 3.5 Haiku", note: "fast, cheap" },
+  { id: "openai/gpt-4o", label: "GPT-4o", note: "general purpose" },
+  { id: "openai/gpt-4o-mini", label: "GPT-4o mini", note: "fast, cheap" },
+  { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash", note: "long context" },
+  { id: "deepseek/deepseek-chat", label: "DeepSeek", note: "cheap, capable" },
+  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", note: "open weights" },
+];
+
+const CUSTOM = "__custom__";
 
 const chatKey = (target: string) => `knife.agent.chat.${target}`;
 
@@ -93,6 +115,9 @@ export function AgentPane({
   const [live, setLive] = useState<Live | null>(null);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Typing an id the list does not carry.
+  const [typing, setTyping] = useState(false);
+  const known = MODELS.some((m) => m.id === model);
   const endRef = useRef<HTMLDivElement>(null);
   const liveRef = useRef(false);
 
@@ -106,15 +131,25 @@ export function AgentPane({
     liveRef.current = false;
   }, [targetKey]);
 
-  // Persist after every completed turn.
-  useEffect(() => {
-    if (!targetKey) return;
-    try {
-      localStorage.setItem(chatKey(targetKey), JSON.stringify({ turns, history }));
-    } catch {
-      // remembering the chat is a convenience, not a requirement
-    }
-  }, [turns, history, targetKey]);
+  /// Write the conversation out, for the binary it belongs to.
+  ///
+  /// Saving used to be an effect watching the turns, which destroyed chats:
+  /// switching binaries runs the load and the save in the same commit, and the
+  /// save saw the *new* key while the turns it wrote were still the *old*
+  /// binary's — so opening B overwrote B's saved conversation with A's. Saving
+  /// where a turn actually completes means the key and the turns can never
+  /// disagree.
+  const saveChat = useCallback(
+    (key: string, turns: Turn[], history: ChatMessage[]) => {
+      if (!key) return;
+      try {
+        localStorage.setItem(chatKey(key), JSON.stringify({ turns, history }));
+      } catch {
+        // remembering the chat is a convenience, not a requirement
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -149,6 +184,13 @@ export function AgentPane({
           }
           case "suggestion":
             return { ...l, suggestions: [...l.suggestions, ev.suggestion] };
+          // Being made to wait is not the same as being broken, and the pane
+          // used to show nothing at all until the whole turn failed.
+          case "retry":
+            return {
+              ...l,
+              status: `rate limited — retrying in ${ev.seconds}s (${ev.attempt}/${ev.of})`,
+            };
           case "done":
             return { ...l, status: "" };
           default:
@@ -164,22 +206,27 @@ export function AgentPane({
   const ask = async () => {
     const q = input.trim();
     if (!q || liveRef.current) return;
+    // The binary this answer belongs to, taken now: a turn runs for a while and
+    // the analyst may have moved on by the time it lands.
+    const key = targetKey;
     setInput("");
     setError(null);
     setLive({ question: q, reply: "", steps: [], suggestions: [], status: "thinking" });
     liveRef.current = true;
     try {
       const t = await api.agentAsk(model, q, history);
-      setTurns((all) => [
-        ...all,
-        {
-          question: q,
-          reply: t.reply,
-          steps: t.steps,
-          suggestions: t.suggestions,
-          applied: t.applied,
-        },
-      ]);
+      const turn: Turn = {
+        question: q,
+        reply: t.reply,
+        steps: t.steps,
+        suggestions: t.suggestions,
+        applied: t.applied,
+      };
+      setTurns((all) => {
+        const next = [...all, turn];
+        saveChat(key, next, t.history);
+        return next;
+      });
       setHistory(t.history);
       if (t.applied.length) await onApplied();
     } catch (e) {
@@ -192,6 +239,7 @@ export function AgentPane({
 
   const autopilot = async () => {
     if (liveRef.current) return;
+    const key = targetKey;
     setError(null);
     setLive({
       question: "🛰 Autopilot — investigating this binary",
@@ -203,16 +251,18 @@ export function AgentPane({
     liveRef.current = true;
     try {
       const t = await api.agentAutopilot(model);
-      setTurns((all) => [
-        ...all,
-        {
-          question: "🛰 Autopilot investigation",
-          reply: t.reply,
-          steps: t.steps,
-          suggestions: t.suggestions,
-          applied: t.applied,
-        },
-      ]);
+      const turn: Turn = {
+        question: "🛰 Autopilot investigation",
+        reply: t.reply,
+        steps: t.steps,
+        suggestions: t.suggestions,
+        applied: t.applied,
+      };
+      setTurns((all) => {
+        const next = [...all, turn];
+        saveChat(key, next, t.history);
+        return next;
+      });
       setHistory(t.history);
       if (t.applied.length) await onApplied();
     } catch (e) {
@@ -487,12 +537,51 @@ export function AgentPane({
                 }
               }}
             />
-            <input
+            {/* A list, not a text box. The id had to be typed from memory, and
+                a typo reads back as a failed request rather than a wrong name. */}
+            <select
               className="agent-model"
-              value={model}
-              onChange={(e) => onModel(e.target.value)}
-              title="OpenRouter model id"
-            />
+              value={known ? model : CUSTOM}
+              title="Which model reads the binary"
+              onChange={(e) => {
+                if (e.target.value === CUSTOM) setTyping(true);
+                else {
+                  setTyping(false);
+                  onModel(e.target.value);
+                }
+              }}
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id} title={`${m.id} — ${m.note}`}>
+                  {m.label}
+                </option>
+              ))}
+              {!known && (
+                <option value={model} title={model}>
+                  {model}
+                </option>
+              )}
+              <option value={CUSTOM}>other…</option>
+            </select>
+            {typing && (
+              <input
+                className="agent-model-id"
+                autoFocus
+                defaultValue={model}
+                placeholder="provider/model-id"
+                title="An OpenRouter model id"
+                onBlur={() => setTyping(false)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const v = (e.target as HTMLInputElement).value.trim();
+                    if (v) onModel(v);
+                    setTyping(false);
+                  } else if (e.key === "Escape") {
+                    setTyping(false);
+                  }
+                }}
+              />
+            )}
           </div>
         </>
       )}
