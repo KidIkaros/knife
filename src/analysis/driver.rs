@@ -209,14 +209,42 @@ fn kernel_api_set() -> BTreeSet<&'static str> {
 
 /// Cheap identity check (no engine pass): is this likely a kernel driver, so
 /// worth the full `report` walk? Subsystem = native, or a `.sys`/`.drv` name.
+/// Whether the image links against the kernel executive.
+///
+/// This is the line between a driver and the kernel itself. A driver calls the
+/// DDK routines — `IoCreateDevice`, `ObReferenceObject`, the rest — which live
+/// in `ntoskrnl` and `hal`, so it imports them. The kernel image *exports* those
+/// and imports only the layers beneath it (`bootvid`, `ci`, `kdcom`), so it
+/// imports neither. `is_system_module` is too wide to tell them apart, because
+/// it counts `ci` and `cng`, which the kernel does import.
+fn imports_kernel(bin: &Binary) -> bool {
+    bin.imports.iter().any(|lib| {
+        let base = lib
+            .name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&lib.name)
+            .to_ascii_lowercase();
+        matches!(
+            base.as_str(),
+            "ntoskrnl" | "ntkrnlmp" | "ntkrnlpa" | "ntkrnlpaex" | "hal"
+        )
+    })
+}
+
+/// Whether this looks like a kernel driver rather than some other native image.
+///
+/// A `.sys`/`.drv` is one on its name alone. Otherwise it takes both a native
+/// subsystem and an actual link to the kernel — subsystem alone was flagging
+/// the kernel itself (`ntoskrnl.exe`), the HAL, and native boot programs like
+/// `smss.exe`, none of which are drivers and none of which have an IOCTL surface
+/// to show.
 pub fn plausibly_a_driver(bin: &Binary) -> bool {
-    if bin.subsystem.as_deref() == Some("native") {
-        return true;
-    }
-    std::path::Path::new(&bin.path)
+    let ext_is_driver = std::path::Path::new(&bin.path)
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("sys") || e.eq_ignore_ascii_case("drv"))
+        .is_some_and(|e| e.eq_ignore_ascii_case("sys") || e.eq_ignore_ascii_case("drv"));
+    ext_is_driver || (bin.subsystem.as_deref() == Some("native") && imports_kernel(bin))
 }
 
 /// The `; field-name` listing hints for a driver: dispatch-slot stores and
@@ -263,16 +291,19 @@ pub fn report(
         .map(|d| d.api)
         .collect();
 
+    // Keep the reasons in step with `plausibly_a_driver`: native subsystem is
+    // only a reason when the image also links the kernel, or the kernel itself
+    // reads as a driver here.
     let mut why = Vec::new();
-    if bin.subsystem.as_deref() == Some("native") {
-        why.push("native subsystem".into());
-    }
     let ext = std::path::Path::new(&bin.path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
     if ext.eq_ignore_ascii_case("sys") || ext.eq_ignore_ascii_case("drv") {
         why.push(format!(".{ext} extension"));
+    }
+    if bin.subsystem.as_deref() == Some("native") && imports_kernel(bin) {
+        why.push("native subsystem, imports the kernel".into());
     }
     let is_driver = !why.is_empty();
     let module = std::path::Path::new(&bin.path)
@@ -641,6 +672,39 @@ mod tests {
         bytes: &[u8],
     ) -> BTreeMap<u64, crate::analysis::strings::Located> {
         crate::listing::string_map(bin, bytes, crate::analysis::engine::display_base(bin))
+    }
+
+    fn native(path: &str, imports: &[&str]) -> Binary {
+        let mut bin = Binary::stub(crate::model::Format::Pe, crate::model::Arch::X86_64);
+        bin.path = path.into();
+        bin.subsystem = Some("native".into());
+        bin.imports = imports
+            .iter()
+            .map(|name| crate::model::ImportedLib {
+                name: (*name).into(),
+                functions: vec!["Fn".into()],
+                ordinals: vec![None],
+            })
+            .collect();
+        bin
+    }
+
+    #[test]
+    fn the_kernel_itself_is_not_a_driver() {
+        // ntoskrnl is native, but it is the kernel: it exports the DDK routines
+        // and imports only the layers beneath it, so it must not read as a
+        // driver just for being native.
+        let kernel = native("ntoskrnl.exe", &["BOOTVID.DLL", "CI.DLL", "KDCOM.DLL"]);
+        assert!(!plausibly_a_driver(&kernel));
+
+        // A real driver is native and links the kernel executive.
+        let driver = native("mystery", &["NTOSKRNL.EXE", "HAL.DLL"]);
+        assert!(plausibly_a_driver(&driver));
+
+        // And a .sys is one on its name, whatever it imports.
+        let mut by_name = Binary::stub(crate::model::Format::Pe, crate::model::Arch::X86_64);
+        by_name.path = "foo.sys".into();
+        assert!(plausibly_a_driver(&by_name));
     }
 
     #[test]
