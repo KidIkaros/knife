@@ -247,6 +247,10 @@ export default function App() {
   const [linearAt, setLinearAt] = useState<string | null>(null);
   const [linearBusy, setLinearBusy] = useState(false);
   const [linearEnd, setLinearEnd] = useState(false);
+  // Why the sweep has nothing, when it has nothing. Held rather than toasted: a
+  // failed sweep leaves the tab empty, which is the condition that asks for the
+  // sweep, so a toast per attempt turns one bad anchor into a stack of them.
+  const [linearError, setLinearError] = useState<string | null>(null);
   // The two filter boxes below fetch straight from their input handler, where
   // there is no effect cleanup to hang a guard on. Each request takes a ticket
   // and only the newest one is allowed to write, so a slow reply for an earlier
@@ -537,6 +541,7 @@ export default function App() {
   const seekLinear = useCallback(
     async (at?: string) => {
       setLinearBusy(true);
+      setLinearError(null);
       try {
         const rows = await api.disassembleLinear(at, 1500);
         setLinear(rows);
@@ -544,27 +549,34 @@ export default function App() {
         setLinearEnd(rows.length === 0);
       } catch (e) {
         setLinear([]);
-        setError(String(e));
+        setLinearError(String(e).replace(/^Error:\s*/i, ""));
       } finally {
         setLinearBusy(false);
       }
     },
-    [setError],
+    [],
   );
 
   /// Read on from where the sweep stopped.
   ///
-  /// The next window starts one byte past the last instruction's address, which
-  /// the decoder then resolves to the real boundary — asking from the last
-  /// address itself would decode it a second time and never advance.
+  /// The next window is asked for from the last instruction's own address, not
+  /// from the byte after it. Only the decoder knows how long that instruction
+  /// was, and it does not resynchronise: pointed one byte in, it would decode
+  /// the tail of an instruction as if it were the start of one and every line
+  /// after would be rubbish. Asking from the last address decodes it a second
+  /// time and then continues correctly, so the repeat is simply dropped.
   const moreLinear = useCallback(async () => {
     if (linearBusy || linearEnd || !linear.length) return;
-    const last = linear[linear.length - 1];
+    // A label carries the address of the instruction beneath it, so anchor on
+    // the last real instruction rather than whatever line happens to be last.
+    const lastInsn = [...linear].reverse().find((l) => l.kind === "insn");
+    if (!lastInsn) return;
+    const from = lastInsn.addr;
     setLinearBusy(true);
     try {
-      const rows = await api.disassembleLinear(`0x${(BigInt(last.addr) + 1n).toString(16)}`, 1500);
-      // Nothing new means the section ran out; stop asking.
-      const fresh = rows.filter((r) => BigInt(r.addr) > BigInt(last.addr));
+      const rows = await api.disassembleLinear(from, 1500);
+      const fresh = rows.filter((r) => BigInt(r.addr) > BigInt(from));
+      // Nothing past the anchor means the section ran out; stop asking.
       if (!fresh.length) setLinearEnd(true);
       else setLinear((all) => [...all, ...fresh]);
     } catch {
@@ -645,6 +657,7 @@ export default function App() {
         setIr([]);
         setLinear([]);
         setLinearEnd(false);
+        setLinearError(null);
         setXrefs([]);
         setHistory([]);
         setFilter("");
@@ -691,6 +704,7 @@ export default function App() {
         setIr([]);
         setLinear([]);
         setLinearEnd(false);
+        setLinearError(null);
         setCfg(null);
         setCgraph(null);
         setHistory([]);
@@ -1375,10 +1389,12 @@ export default function App() {
   // The sweep is only built when the tab is first shown, and it starts wherever
   // you were reading — the function you have open is far likelier to be what you
   // want to see in context than the entry point is.
+  // `linearError` is part of the guard, not just a message: an empty sweep is
+  // exactly what triggers this, so without it a failed anchor retries forever.
   useEffect(() => {
-    if (tab !== "linear" || linear.length || linearBusy) return;
+    if (tab !== "linear" || linear.length || linearBusy || linearError) return;
     void seekLinear(current ?? undefined);
-  }, [tab, linear.length, linearBusy, current, seekLinear]);
+  }, [tab, linear.length, linearBusy, linearError, current, seekLinear]);
 
   // A newly opened function starts at its top. The scroll container outlives the
   // listing inside it, so without this you arrive halfway down a function because
@@ -2160,14 +2176,16 @@ export default function App() {
               {tab === "linear" ? (
                 <>
                   <div className="linbar">
-                    <span className="linwhere">
-                      {linear.length
-                        ? `${linear[0].addr} — ${linear[linear.length - 1].addr}`
-                        : linearBusy
-                          ? "sweeping…"
-                          : "nothing decoded"}
+                    <span className={"linwhere" + (linearError ? " bad" : "")}>
+                      {linearError
+                        ? linearError
+                        : linear.length
+                          ? `${linear[0].addr} — ${linear[linear.length - 1].addr}`
+                          : linearBusy
+                            ? "sweeping…"
+                            : "nothing decoded"}
                     </span>
-                    <span className="lincount">{linear.length} lines</span>
+                    {!linearError && <span className="lincount">{linear.length} lines</span>}
                     <div className="spacer" />
                     <button className="act" onClick={() => void seekLinear(undefined)}>
                       entry

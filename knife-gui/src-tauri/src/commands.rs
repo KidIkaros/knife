@@ -243,7 +243,10 @@ pub fn hex_dump(
     state
         .read(|l| {
             let at = parse_addr(&addr)?;
-            let off = reknife::analysis::disasm::vaddr_to_off(&l.session.bin, at)
+            // Same correction as the linear sweep: the address on screen is
+            // absolute, and only `va_to_off` takes the image base off first. With
+            // `disasm::vaddr_to_off` here the inspector could never open on a PE.
+            let off = engine::va_to_off(&l.session.bin, l.base, at)
                 .ok_or_else(|| anyhow!("{addr} is not in any section"))?;
             let want = len.unwrap_or(128).clamp(16, 1024);
             let start = (off as usize).min(l.session.bytes.len());
@@ -306,9 +309,12 @@ pub fn disassemble_linear(
             let (foff, va) = match at.as_deref() {
                 Some(s) => {
                     let va = parse_addr(s)?;
-                    let off = disasm::vaddr_to_off(bin, va)
+                    // `engine::va_to_off`, not `disasm::vaddr_to_off`: the window
+                    // shows absolute addresses, and the latter wants a PE RVA —
+                    // handing it one of ours means it never matches a section.
+                    let off = engine::va_to_off(bin, l.base, va)
                         .ok_or_else(|| anyhow!("{s} is not in any section"))?;
-                    (off, va)
+                    (off as u64, va)
                 }
                 None => disasm::entry_location(bin, &l.session.bytes)
                     .ok_or_else(|| anyhow!("cannot locate the entry point"))?,
