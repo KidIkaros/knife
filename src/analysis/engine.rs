@@ -8,7 +8,8 @@
 
 use crate::model::{Binary, Format, SymKind};
 use iced_x86::{
-    Decoder, DecoderOptions, FlowControl, Formatter, Instruction, IntelFormatter, Mnemonic,
+    Decoder, DecoderOptions, FlowControl, Formatter, Instruction, InstructionInfoFactory,
+    IntelFormatter, Mnemonic, OpAccess,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -755,8 +756,13 @@ fn build_function(
     let mut max_end = entry;
     // Addresses the code is known to have written into registers (only ever
     // via `lea r64,[rip+x]` / `mov r64, imm`), which is what makes a switch's
-    // table address knowable. Inaccurate across conditional paths by design.
-    // a stale entry can only *miss* a table, never invent one.
+    // table address knowable. Inaccurate across conditional paths by design: a
+    // value set on one branch is used on all of them, so a table can be missed.
+    //
+    // It must not be inaccurate in the other direction. An entry is dropped as
+    // soon as anything writes the register, because a stale one does not merely
+    // miss a table — it supplies a wrong base, and the addresses read there
+    // become successors of a block that never goes to them.
     let mut regs: HashMap<iced_x86::Register, u64> = HashMap::new();
 
     // A block target inside this function that is not another function's entry.
@@ -863,6 +869,25 @@ fn build_function(
             // Constant register tracking (see `regs`), general-case limited to
             // the two shapes real compilers use to address switch tables.
             if let Some(insn) = &ice {
+                // Anything written stops being the address we recorded. Without
+                // this the entry outlived the value: `lea rax,[table]` then
+                // `add rax, rbx` left `rax` still mapped to the table, so a
+                // later indexed jump read a table that was never there and
+                // invented successors for it. Implicit writes count — a `call`
+                // clobbers the caller-saved registers, a `div` writes rdx:rax.
+                let mut info = InstructionInfoFactory::new();
+                for u in info.info(insn).used_registers() {
+                    if matches!(
+                        u.access(),
+                        OpAccess::Write
+                            | OpAccess::CondWrite
+                            | OpAccess::ReadWrite
+                            | OpAccess::ReadCondWrite
+                    ) {
+                        regs.remove(&u.register().full_register());
+                        regs.remove(&u.register());
+                    }
+                }
                 if insn.op0_kind() == iced_x86::OpKind::Register {
                     let reg = insn.op0_register();
                     let known = if insn.mnemonic() == iced_x86::Mnemonic::Lea
