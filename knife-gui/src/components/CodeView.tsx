@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Finding, IrLine, Line } from "../api";
 
@@ -48,6 +48,9 @@ export const CodeView = forwardRef<
     onLineMenu: (index: number, at: { x: number; y: number }) => void;
     onFinding: (f: Finding) => void;
     onPrimitive: () => void;
+    /// Called as the view approaches the last line, for a listing that continues
+    /// past what has been fetched — the linear sweep reads on from here.
+    onEndReached?: () => void;
   }
 >(function CodeView(
   {
@@ -67,6 +70,7 @@ export const CodeView = forwardRef<
     onLineMenu,
     onFinding,
     onPrimitive,
+    onEndReached,
   },
   ref,
 ) {
@@ -215,10 +219,18 @@ export const CodeView = forwardRef<
     );
   };
 
+  const items = v.getVirtualItems();
+  // Ask for more once the end is in sight rather than at it, so the next window
+  // is usually there before the scroll arrives.
+  const lastShown = items.length ? items[items.length - 1].index : 0;
+  useEffect(() => {
+    if (onEndReached && count > 0 && lastShown >= count - 12) onEndReached();
+  }, [onEndReached, lastShown, count]);
+
   return (
     <div className="code" ref={parentRef}>
       <div style={{ height: v.getTotalSize(), position: "relative" }}>
-        {v.getVirtualItems().map((item) => (
+        {items.map((item) => (
           <div
             key={item.key}
             data-index={item.index}

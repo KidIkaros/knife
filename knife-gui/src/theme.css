@@ -252,6 +252,26 @@ body {
   background: var(--critical);
 }
 
+/* ── linear sweep toolbar ─────────────────────────────────────────────── */
+.linbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.linbar .linwhere {
+  color: var(--text);
+}
+
+.linbar .lincount {
+  color: var(--faint);
+}
+
 /* ── taint trail ──────────────────────────────────────────────────────────
    The picked finding's data flow, marked on the listing: every instruction the
    dangerous argument came through, and the call it reaches. Tinted rather than

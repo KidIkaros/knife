@@ -345,6 +345,10 @@ export const api = {
   listFunctions: (filter?: string, namedOnly?: boolean, limit?: number) =>
     invoke<FnRow[]>("list_functions", { filter, namedOnly, limit }),
   disassemble: (selector: string) => invoke<Line[]>("disassemble", { selector }),
+  /// A linear sweep of the image from `at` (or the entry point). Forward only:
+  /// read on by asking again from the address after the last instruction.
+  disassembleLinear: (at?: string, count?: number) =>
+    invoke<Line[]>("disassemble_linear", { at, count }),
   decompile: (selector: string) => invoke<IrLine[]>("decompile", { selector }),
   xrefs: (addr: string, direction: "to" | "from") =>
     invoke<XrefRow[]>("xrefs", { addr, direction }),

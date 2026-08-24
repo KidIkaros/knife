@@ -73,6 +73,7 @@ fn main() {
             commands::export_findings,
             commands::hex_dump,
             commands::overview,
+            commands::disassemble_linear,
             commands::binary_detail,
             commands::set_name,
             commands::set_note,

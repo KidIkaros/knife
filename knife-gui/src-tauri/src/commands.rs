@@ -4,13 +4,13 @@
 //! reply and turns `anyhow` errors into strings the frontend can show.
 
 use crate::dto::{
-    hex, CfgDto, CfgEdge, CfgNode, FindingDto, FnRow, IrLineDto, LineDto, OpenResult,
+    hex, AnnotDto, CfgDto, CfgEdge, CfgNode, FindingDto, FnRow, IrLineDto, LineDto, OpenResult,
     OverviewBucket, OverviewDto, StringRow, XrefRow,
 };
 use crate::state::{AppState, TargetRow};
 use anyhow::{anyhow, Result};
 use reknife::analysis::engine::{self, Analysis, Function};
-use reknife::analysis::graphs;
+use reknife::analysis::{disasm, graphs};
 use reknife::db;
 use reknife::listing;
 use reknife::model::SymKind;
@@ -271,6 +271,105 @@ pub fn hex_dump(
             Ok(rows)
         })
         .map_err(|e| e.to_string())
+}
+
+/// A linear sweep of the image, rather than one recovered function.
+///
+/// The function views answer "what does this routine do". They cannot answer
+/// "what is actually at this address", because recovery only reaches code it can
+/// prove is reachable — anything it missed, and every byte between functions, is
+/// simply absent from the window. This decodes straight through from an anchor,
+/// the way `knife dis` does, so the whole image can be read end to end.
+///
+/// Windowed, and forward only. x86 instructions vary in length, so there is no
+/// way to land in the middle of the stream and know you are on a boundary: a
+/// sweep is only trustworthy from a known start. `at` is that start — an address
+/// the caller trusts, or the entry point — and the caller reads on by asking
+/// again from the address after the last instruction returned.
+#[tauri::command]
+pub fn disassemble_linear(
+    state: State<AppState>,
+    at: Option<String>,
+    count: Option<usize>,
+) -> Result<Vec<LineDto>, String> {
+    let want = count.unwrap_or(2000).clamp(1, 20000);
+    state
+        .read(|l| {
+            let bin = &l.session.bin;
+            let an = &l.session.an;
+            if !disasm::supported(bin.arch) {
+                return Err(anyhow!(
+                    "disassembly supports x86/x64 and AArch64; this is {}",
+                    bin.arch.label()
+                ));
+            }
+            let (foff, va) = match at.as_deref() {
+                Some(s) => {
+                    let va = parse_addr(s)?;
+                    let off = disasm::vaddr_to_off(bin, va)
+                        .ok_or_else(|| anyhow!("{s} is not in any section"))?;
+                    (off, va)
+                }
+                None => disasm::entry_location(bin, &l.session.bytes)
+                    .ok_or_else(|| anyhow!("cannot locate the entry point"))?,
+            };
+
+            let insns = disasm::disassemble(&l.session.bytes, foff, va, bin.bits, bin.arch, want);
+
+            let mut out = Vec::with_capacity(insns.len() + 16);
+            for i in &insns {
+                // A function start is where the reader gets their bearings, so
+                // the name goes in as its own line the way the function view
+                // writes one. Without them a linear sweep is an undifferentiated
+                // wall and you cannot tell one routine from the next.
+                if let Some(f) = an.find_function(i.addr) {
+                    if f.addr == i.addr {
+                        out.push(LineDto::Label {
+                            addr: hex(i.addr),
+                            text: format!("{}:", f.name),
+                        });
+                    }
+                }
+                let (mnemonic, operands) = match i.text.split_once(char::is_whitespace) {
+                    Some((m, rest)) => (m.to_string(), rest.trim_start().to_string()),
+                    None => (i.text.clone(), String::new()),
+                };
+                // Name what a branch or call points at, and make it followable,
+                // by reading the target back out of the operand text.
+                let target = trailing_addr(&operands)
+                    .filter(|t| an.find_function(*t).is_some() || an.imports.contains_key(t));
+                let annot = target.map(|t| AnnotDto {
+                    kind: "symbol",
+                    text: an.label(t),
+                });
+                out.push(LineDto::Insn {
+                    addr: hex(i.addr),
+                    mnemonic,
+                    operands,
+                    annot,
+                    target: target.map(hex),
+                });
+            }
+            Ok(out)
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The last `0x…` in an operand list, which for a direct call or jump is what it
+/// targets. Returns nothing when the operands hold no plain address — a register
+/// or memory form has no single destination to name.
+fn trailing_addr(operands: &str) -> Option<u64> {
+    let at = operands.rfind("0x")?;
+    let digits: String = operands[at + 2..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    // A memory operand keeps its address inside brackets; that is a location the
+    // instruction reads, not somewhere control goes.
+    if operands[at..].contains(']') {
+        return None;
+    }
+    u64::from_str_radix(&digits, 16).ok()
 }
 
 /// The navigator band: a whole-file overview sampled into buckets, each carrying

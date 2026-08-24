@@ -60,7 +60,7 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Console } from "./components/Console";
 import { SymbolList } from "./components/SymbolList";
 
-type Tab = "disasm" | "pseudo" | "graph" | "calls" | "criticals";
+type Tab = "disasm" | "pseudo" | "graph" | "calls" | "criticals" | "linear";
 type LeftView =
   | "functions"
   | "attack"
@@ -239,6 +239,14 @@ export default function App() {
   const [yaraRules, setYaraRules] = useState<string | null>(null);
   const [detail, setDetail] = useState<BinaryDetail | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  // The linear sweep: the image read straight through rather than one recovered
+  // function at a time. Held apart from `lines` so switching tabs does not
+  // disturb the function you were reading, and so scrolling on here does not
+  // reload that.
+  const [linear, setLinear] = useState<Line[]>([]);
+  const [linearAt, setLinearAt] = useState<string | null>(null);
+  const [linearBusy, setLinearBusy] = useState(false);
+  const [linearEnd, setLinearEnd] = useState(false);
   // The two filter boxes below fetch straight from their input handler, where
   // there is no effect cleanup to hang a guard on. Each request takes a ticket
   // and only the newest one is allowed to write, so a slow reply for an earlier
@@ -435,14 +443,16 @@ export default function App() {
     if (tab === "pseudo") {
       ir.forEach((l, i) => l.text.toLowerCase().includes(q) && out.push(i));
     } else {
-      lines.forEach((l, i) => {
+      // Hits are line indices, so they have to be indices into the listing the
+      // view is actually showing — the sweep is its own listing.
+      (tab === "linear" ? linear : lines).forEach((l, i) => {
         const text =
           l.kind === "insn" ? `${l.addr} ${l.mnemonic} ${l.operands} ${l.annot?.text ?? ""}` : l.text;
         if (text.toLowerCase().includes(q)) out.push(i);
       });
     }
     return out;
-  }, [find, tab, ir, lines]);
+  }, [find, tab, ir, lines, linear]);
 
   // Bookmarks ride on the open target; refetch when it changes.
   useEffect(() => {
@@ -522,6 +532,48 @@ export default function App() {
     [current, opened, remember],
   );
 
+  /// Start the linear sweep somewhere: an address, or the entry point when the
+  /// caller has nowhere particular in mind. Replaces whatever was there.
+  const seekLinear = useCallback(
+    async (at?: string) => {
+      setLinearBusy(true);
+      try {
+        const rows = await api.disassembleLinear(at, 1500);
+        setLinear(rows);
+        setLinearAt(at ?? null);
+        setLinearEnd(rows.length === 0);
+      } catch (e) {
+        setLinear([]);
+        setError(String(e));
+      } finally {
+        setLinearBusy(false);
+      }
+    },
+    [setError],
+  );
+
+  /// Read on from where the sweep stopped.
+  ///
+  /// The next window starts one byte past the last instruction's address, which
+  /// the decoder then resolves to the real boundary — asking from the last
+  /// address itself would decode it a second time and never advance.
+  const moreLinear = useCallback(async () => {
+    if (linearBusy || linearEnd || !linear.length) return;
+    const last = linear[linear.length - 1];
+    setLinearBusy(true);
+    try {
+      const rows = await api.disassembleLinear(`0x${(BigInt(last.addr) + 1n).toString(16)}`, 1500);
+      // Nothing new means the section ran out; stop asking.
+      const fresh = rows.filter((r) => BigInt(r.addr) > BigInt(last.addr));
+      if (!fresh.length) setLinearEnd(true);
+      else setLinear((all) => [...all, ...fresh]);
+    } catch {
+      setLinearEnd(true);
+    } finally {
+      setLinearBusy(false);
+    }
+  }, [linear, linearBusy, linearEnd]);
+
   /// Load every view for whichever target is currently active.
   const loadViews = useCallback(async () => {
     const [fns, fnd, det] = await Promise.all([
@@ -591,6 +643,8 @@ export default function App() {
         setSelected(null);
         setLines([]);
         setIr([]);
+        setLinear([]);
+        setLinearEnd(false);
         setXrefs([]);
         setHistory([]);
         setFilter("");
@@ -635,6 +689,8 @@ export default function App() {
         setSelected(null);
         setLines([]);
         setIr([]);
+        setLinear([]);
+        setLinearEnd(false);
         setCfg(null);
         setCgraph(null);
         setHistory([]);
@@ -1316,6 +1372,14 @@ export default function App() {
     codeRef.current?.scrollToLine(hits[Math.min(hit, hits.length - 1)]);
   }, [hit, hits]);
 
+  // The sweep is only built when the tab is first shown, and it starts wherever
+  // you were reading — the function you have open is far likelier to be what you
+  // want to see in context than the entry point is.
+  useEffect(() => {
+    if (tab !== "linear" || linear.length || linearBusy) return;
+    void seekLinear(current ?? undefined);
+  }, [tab, linear.length, linearBusy, current, seekLinear]);
+
   // A newly opened function starts at its top. The scroll container outlives the
   // listing inside it, so without this you arrive halfway down a function because
   // that is where you were reading the last one.
@@ -1953,6 +2017,13 @@ export default function App() {
                 >
                   calls
                 </div>
+                <div
+                  className={"tab" + (tab === "linear" ? " active" : "")}
+                  title="the image read straight through, not one function at a time"
+                  onClick={() => setTab("linear")}
+                >
+                  linear
+                </div>
                 <div className="title">
                   {renaming ? (
                     <input
@@ -2086,7 +2157,71 @@ export default function App() {
                 </div>
               )}
 
-              {tab === "criticals" ? (
+              {tab === "linear" ? (
+                <>
+                  <div className="linbar">
+                    <span className="linwhere">
+                      {linear.length
+                        ? `${linear[0].addr} — ${linear[linear.length - 1].addr}`
+                        : linearBusy
+                          ? "sweeping…"
+                          : "nothing decoded"}
+                    </span>
+                    <span className="lincount">{linear.length} lines</span>
+                    <div className="spacer" />
+                    <button className="act" onClick={() => void seekLinear(undefined)}>
+                      entry
+                    </button>
+                    <button
+                      className="act"
+                      disabled={!current}
+                      title="sweep from the function you have open"
+                      onClick={() => current && void seekLinear(current)}
+                    >
+                      here
+                    </button>
+                    <button
+                      className="act"
+                      title="sweep from an address"
+                      onClick={() =>
+                        ask("Sweep from", linearAt ?? "", "an address in a mapped section", (v) => {
+                          if (v.trim()) void seekLinear(v.trim());
+                        })
+                      }
+                    >
+                      goto
+                    </button>
+                  </div>
+                  <CodeView
+                    ref={codeRef}
+                    tab="disasm"
+                    lines={linear}
+                    ir={[]}
+                    selected={selected}
+                    irSelected={null}
+                    hits={hits}
+                    currentHit={hits.length ? hits[hit % hits.length] : null}
+                    findingAt={findingAt}
+                    primAt={primAt}
+                    trailAt={trailAt}
+                    onSelect={setSelected}
+                    onSelectIr={() => {}}
+                    onFollow={(sel) => {
+                      // Following a call from the sweep opens that routine the
+                      // usual way, which is the point of naming the target.
+                      setTab("disasm");
+                      void openFunction(sel);
+                    }}
+                    onFinding={showFinding}
+                    onPrimitive={() => {
+                      setLeftView("driver");
+                      setLeftOpen(true);
+                    }}
+                    onLineMenu={() => {}}
+                    onEndReached={moreLinear}
+                  />
+                </>
+              ) : tab === "criticals" ? (
                 <CriticalsDashboard
                   findings={findings}
                   onJump={(f) => {
