@@ -342,6 +342,16 @@ export interface Applied {
   note?: string;
 }
 
+export interface AgentQuota {
+  label: string;
+  free_tier: boolean;
+  usage: number;
+  limit: number | null;
+  remaining: number | null;
+  requests: number | null;
+  interval: string | null;
+}
+
 export interface AgentTurn {
   reply: string;
   steps: AgentStep[];
@@ -415,6 +425,9 @@ export const api = {
   agentAsk: (model: string, question: string, history: ChatMessage[]) =>
     invoke<AgentTurn>("agent_ask", { model, question, history }),
   agentCancel: () => invoke<void>("agent_cancel"),
+  /// What the provider says this key is allowed. Used to pace requests and to
+  /// show the analyst the real allowance rather than a guess.
+  agentQuota: () => invoke<AgentQuota>("agent_quota"),
   presenceUpdate: (details: string, state: string, tooltip: string) =>
     invoke<void>("presence_update", { details, state, tooltip }),
   agentAutopilot: (model: string) => invoke<AgentTurn>("agent_autopilot", { model }),

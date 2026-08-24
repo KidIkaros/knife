@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, type Applied, type AgentStep, type ChatMessage, type Suggestion } from "../api";
+import {
+  api,
+  type AgentQuota,
+  type Applied,
+  type AgentStep,
+  type ChatMessage,
+  type Suggestion,
+} from "../api";
 import { Markdown } from "./Markdown";
 import knifechan from "../assets/knifechan.png";
 
@@ -118,6 +125,9 @@ export function AgentPane({
   const [error, setError] = useState<string | null>(null);
   // Typing an id the list does not carry.
   const [typing, setTyping] = useState(false);
+  // What the provider says this key may do. Shown rather than guessed at: a
+  // limit you can see is a limit you can plan around.
+  const [quota, setQuota] = useState<AgentQuota | null>(null);
   const known = MODELS.some((m) => m.id === model);
   const endRef = useRef<HTMLDivElement>(null);
   const liveRef = useRef(false);
@@ -155,6 +165,19 @@ export function AgentPane({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [turns, live]);
+
+  // Ask once the key exists, and again after a turn — usage moves.
+  useEffect(() => {
+    if (!hasKey || !enabled) return;
+    let live = true;
+    api
+      .agentQuota()
+      .then((q) => live && setQuota(q))
+      .catch(() => live && setQuota(null));
+    return () => {
+      live = false;
+    };
+  }, [hasKey, enabled, turns.length]);
 
   useEffect(() => {
     const un = listen<AgentEvent>("knife://agent", (e) => {
@@ -542,6 +565,21 @@ export function AgentPane({
                 }
               }}
             />
+            {quota && (
+              <span
+                className={"agent-quota" + (quota.free_tier ? " free" : "")}
+                title={
+                  quota.requests && quota.interval
+                    ? `${quota.label || "this key"} — ${quota.requests} requests per ${quota.interval}` +
+                      (quota.free_tier ? ", free tier" : "") +
+                      `. Requests are spaced to stay inside it.`
+                    : `${quota.label || "this key"} — usage ${quota.usage}`
+                }
+              >
+                {quota.free_tier ? "free" : "paid"}
+                {quota.requests && quota.interval ? ` · ${quota.requests}/${quota.interval}` : ""}
+              </span>
+            )}
             {/* A list, not a text box. The id had to be typed from memory, and
                 a typo reads back as a failed request rather than a wrong name. */}
             <select

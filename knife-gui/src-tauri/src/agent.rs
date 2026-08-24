@@ -383,16 +383,42 @@ fn emit(app: &tauri::AppHandle, payload: Value) {
 }
 
 /// Pull a human message out of an OpenRouter error body.
+/// Everything the provider said about a failure, not just its headline.
+///
+/// This used to read `error.message` alone, which for this provider is very
+/// often the words "Provider returned error" — true, and no use to anyone. What
+/// actually went wrong is in `error.code` and `error.metadata`, and dropping
+/// them turned a diagnosable failure into a shrug.
 fn error_message(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| text.chars().take(300).collect())
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return text.chars().take(400).collect();
+    };
+    let Some(err) = v.get("error") else {
+        return text.chars().take(400).collect();
+    };
+    let head = err
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("request failed")
+        .to_string();
+
+    let mut parts = vec![head];
+    if let Some(code) = err.get("code") {
+        parts.push(format!("code {code}"));
+    }
+    // `metadata` carries the upstream provider's own words, which is usually the
+    // only part that says anything specific.
+    if let Some(meta) = err.get("metadata") {
+        let detail = meta
+            .get("raw")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| meta.to_string());
+        if !detail.is_empty() && detail != "{}" {
+            parts.push(detail.chars().take(400).collect());
+        }
+    }
+    parts.join(" · ")
 }
 
 /// One reassembled streamed tool call.
@@ -499,6 +525,108 @@ fn trim_history(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     out.extend(system);
     out.extend(rest.drain(keep_from..));
     out
+}
+
+/// What the provider says this key is allowed, in its own words.
+#[derive(Serialize, Clone, Default)]
+pub struct Quota {
+    pub label: String,
+    pub free_tier: bool,
+    /// Credit spent, and the ceiling if there is one.
+    pub usage: f64,
+    pub limit: Option<f64>,
+    pub remaining: Option<f64>,
+    /// The declared request allowance, e.g. 10 requests per 10s.
+    pub requests: Option<u64>,
+    pub interval: Option<String>,
+}
+
+/// Ask the provider what this key may do.
+///
+/// Guessing at someone else's limits from the outside is how the last two
+/// attempts at this went. The provider publishes them, so the pane can simply
+/// look, pace itself correctly from the first request rather than after the
+/// first refusal, and tell the analyst what the allowance actually is.
+#[tauri::command]
+pub async fn agent_quota() -> Result<Quota, String> {
+    let key = read_key().map_err(|e| e.to_string())?;
+    let resp = http()
+        .get("https://openrouter.ai/api/v1/auth/key")
+        .bearer_auth(&key)
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the provider: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} ({status})", error_message(&text)));
+    }
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let d = body.get("data").unwrap_or(&body);
+    let num = |k: &str| d.get(k).and_then(Value::as_f64);
+    let rate = d.get("rate_limit");
+    let quota = Quota {
+        label: d
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        free_tier: d
+            .get("is_free_tier")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        usage: num("usage").unwrap_or(0.0),
+        limit: num("limit"),
+        remaining: num("limit_remaining"),
+        requests: rate.and_then(|r| r.get("requests")).and_then(Value::as_u64),
+        interval: rate
+            .and_then(|r| r.get("interval"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    adopt_pace(&quota);
+    Ok(quota)
+}
+
+/// Look up the allowance once a session, before the first request goes out.
+///
+/// Best effort on purpose: if the lookup fails the turn proceeds unpaced and
+/// falls back to learning from a refusal, which is the behaviour that was there
+/// before. Not being able to ask about the limits is no reason not to work.
+async fn learn_limits_once() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = agent_quota().await;
+}
+
+/// Set the spacing from what the provider declared, before anything is refused.
+fn adopt_pace(q: &Quota) {
+    let (Some(requests), Some(interval)) = (q.requests, q.interval.as_deref()) else {
+        return;
+    };
+    // Intervals come as "10s" / "1m"; anything else is left alone rather than
+    // guessed at.
+    let seconds = match interval.trim() {
+        s if s.ends_with('s') => s.trim_end_matches('s').parse::<f64>().ok(),
+        s if s.ends_with('m') => s
+            .trim_end_matches('m')
+            .parse::<f64>()
+            .ok()
+            .map(|m| m * 60.0),
+        _ => None,
+    };
+    let (Some(seconds), true) = (seconds, requests > 0) else {
+        return;
+    };
+    // One request per slot, with a little room so a clock difference does not
+    // put us just over the line.
+    let gap = Duration::from_secs_f64((seconds / requests as f64) * 1.15);
+    let mut pace = PACE.lock().unwrap();
+    if pace.is_none_or(|p| p < gap) {
+        *pace = Some(gap);
+    }
 }
 
 /// Whether waiting and asking again could plausibly work.
@@ -785,6 +913,7 @@ async fn agent_turn(
     });
 
     CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+    learn_limits_once().await;
     let client = http();
     let mut steps: Vec<AgentStep> = Vec::new();
     let mut suggestions: Vec<Suggestion> = Vec::new();

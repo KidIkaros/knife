@@ -2600,6 +2600,23 @@ button.act:disabled {
   border-color: var(--faint);
 }
 
+/* The provider's own statement of what this key may do. */
+.agent-quota {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--faint);
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* A free key is the one with a limit worth keeping an eye on. */
+.agent-quota.free {
+  color: var(--amber);
+  border-color: #4a4326;
+}
+
 /* Shown only while an id outside the list is being typed. */
 .agent-model-id {
   width: 190px;
