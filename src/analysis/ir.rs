@@ -103,8 +103,21 @@ pub enum Stmt {
     /// An indexed indirect jump (a jump table). The expression is the selector;
     /// the case targets are the block's successors, resolved by the engine.
     Switch(Expr),
-    /// Verbatim assembly for an unmodelled instruction.
-    Asm(String),
+    /// Verbatim assembly for an unmodelled instruction, with what it touches.
+    ///
+    /// The registers matter as much as the text. An unmodelled instruction is
+    /// still an instruction: it writes registers, and every pass downstream has
+    /// to know that or it will reason about values the machine has already
+    /// replaced. `div` is unmodelled and writes `rax`; without `defs` the
+    /// propagator happily carries the old `rax` past it and prints a value that
+    /// was never there. Without `uses`, the store feeding it looks dead and is
+    /// deleted. Being unable to describe an instruction is fine; pretending it
+    /// did nothing is not.
+    Asm {
+        text: String,
+        defs: Vec<Register>,
+        uses: Vec<Register>,
+    },
 }
 
 /// A block of lifted statements with its address and successors.
@@ -297,7 +310,7 @@ fn rewrite_stmt_phis(statement: &mut Stmt, condition: &Expr, taken_pos: usize) {
         | Stmt::Ret(Some(expr))
         | Stmt::Branch(expr, _)
         | Stmt::Switch(expr) => rewrite_expr_phis(expr, condition, taken_pos),
-        Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm(_) => {}
+        Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm { .. } => {}
     }
 }
 
@@ -862,11 +875,11 @@ fn lift_insn(
             None if d.op0_kind() == OpKind::Memory && d.memory_index() != Register::None => {
                 Stmt::Switch(reg_val(st, d.memory_index()))
             }
-            None => Stmt::Asm(raw(d)),
+            None => asm_stmt(d),
         }),
         m if is_jcc(m) => Some(match branch_target(d) {
             Some(t) => Stmt::Branch(condition(m, &st.cmp), t),
-            None => Stmt::Asm(raw(d)),
+            None => asm_stmt(d),
         }),
         // `setcc dst` is a boolean: `dst = (comparison)`.
         m if is_setcc(m) && cc_to_jcc(m).is_some() => {
@@ -883,7 +896,7 @@ fn lift_insn(
                 Expr::Ternary(Box::new(cond), Box::new(src), Box::new(keep)),
             ))
         }
-        _ => Some(Stmt::Asm(raw(d))),
+        _ => Some(asm_stmt(d)),
     };
 
     // Maintain the recovered comparison for a following `jcc`, which may be in a
@@ -936,6 +949,19 @@ fn lift_insn(
 /// new pure value, forget it otherwise, and drop memory-reading values whenever
 /// a store or call could have changed memory.
 fn update_state(st: &mut Lift, s: &Stmt) {
+    // An instruction we could not model still ran. Forget what it wrote, or the
+    // value propagated past it is the one it just overwrote — `mov rax, 5; div
+    // rcx; mov rbx, rax` would otherwise print `rbx = 5`, which is not merely
+    // vague but false. Memory is dropped too: we cannot see where it wrote.
+    if let Stmt::Asm { defs, .. } = s {
+        for r in defs {
+            st.regs.remove(r);
+        }
+        if !defs.is_empty() {
+            st.regs.retain(|_, e| !reads_mem(e));
+        }
+        return;
+    }
     let clobbers_mem = matches!(s, Stmt::Set(Expr::Mem(_), _))
         || matches!(s, Stmt::Set(_, src) if contains_call(src));
     if clobbers_mem {
@@ -1248,6 +1274,17 @@ fn apply_liveness(s: &Stmt, live: &mut BTreeSet<Register>) {
         }
         Stmt::CallVoid(e) | Stmt::Branch(e, _) | Stmt::Ret(Some(e)) | Stmt::Switch(e) => {
             reads_regs(e, live)
+        }
+        // What an unmodelled instruction reads is still read. Falling through
+        // here meant the store feeding a `div` had no visible consumer, so the
+        // dead-store pass deleted the very value being divided.
+        Stmt::Asm { defs, uses, .. } => {
+            for r in defs {
+                live.remove(r);
+            }
+            for r in uses {
+                live.insert(*r);
+            }
         }
         _ => {}
     }
@@ -1932,7 +1969,7 @@ fn visit_stmt_exprs(s: &Stmt, mut visit: impl FnMut(&Expr)) {
     match s {
         Stmt::Set(_, src) => visit(src),
         Stmt::CallVoid(e) | Stmt::Ret(Some(e)) | Stmt::Branch(e, _) | Stmt::Switch(e) => visit(e),
-        Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm(_) => {}
+        Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm { .. } => {}
     }
 }
 
@@ -2144,7 +2181,7 @@ fn local_declarations_impl(
                 Stmt::CallVoid(e) | Stmt::Ret(Some(e)) | Stmt::Branch(e, _) | Stmt::Switch(e) => {
                     locals_in_expr(e, None, strings, &mut locals, context, &mut parameter_cache)
                 }
-                Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm(_) => {}
+                Stmt::Ret(None) | Stmt::Goto(_) | Stmt::Asm { .. } => {}
             }
         }
     }
@@ -3050,7 +3087,7 @@ fn render_stmt(s: &Stmt, base: u64, r: Rx) -> String {
         Stmt::Branch(c, t) => format!("if ({}) goto loc_{:x};", render_expr(c, r), t + base),
         Stmt::Goto(t) => format!("goto loc_{:x};", t + base),
         Stmt::Switch(sel) => format!("switch ({}) {{ /* jump table */ }}", render_expr(sel, r)),
-        Stmt::Asm(s) => format!("/* {s} */"),
+        Stmt::Asm { text, .. } => format!("/* {text} */"),
     }
 }
 
@@ -3192,6 +3229,41 @@ fn render_expr(e: &Expr, r: Rx) -> String {
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────
+
+/// An unmodelled instruction, together with the registers it writes and reads.
+///
+/// Read off the decoder rather than guessed: `used_registers` reports every
+/// operand access including the implicit ones, which is exactly what is needed
+/// here — the whole problem with an instruction we cannot describe is that its
+/// effects are mostly implicit (`div` writing `rdx:rax`, `cdq` writing `edx`).
+/// Roots only, since propagation and liveness are both keyed by full register.
+fn asm_stmt(d: &Instruction) -> Stmt {
+    let mut info = InstructionInfoFactory::new();
+    let mut defs = Vec::new();
+    let mut uses = Vec::new();
+    for u in info.info(d).used_registers() {
+        let r = u.register().full_register();
+        // A conditional access counts as an access: whether it happened is
+        // exactly what we cannot tell, so the safe reading is that it did.
+        let (writes, reads) = match u.access() {
+            OpAccess::Write | OpAccess::CondWrite => (true, false),
+            OpAccess::ReadWrite | OpAccess::ReadCondWrite => (true, true),
+            OpAccess::Read | OpAccess::CondRead => (false, true),
+            _ => (false, false),
+        };
+        if writes && !defs.contains(&r) {
+            defs.push(r);
+        }
+        if reads && !uses.contains(&r) {
+            uses.push(r);
+        }
+    }
+    Stmt::Asm {
+        text: raw(d),
+        defs,
+        uses,
+    }
+}
 
 fn raw(d: &Instruction) -> String {
     let mut fmt = IntelFormatter::new();
@@ -3859,6 +3931,57 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.text.contains("/*") && l.text.contains("cpuid")));
+    }
+
+    #[test]
+    fn an_unmodelled_write_is_not_propagated_past() {
+        // mov rax, 5 ; div rcx ; mov rbx, rax ; ret
+        //
+        // `div` is not modelled, but it writes rax. Carrying the 5 across it
+        // would print a value the machine had already thrown away — the worst
+        // kind of wrong, because it reads like a fact.
+        let code = vec![
+            0x48, 0xc7, 0xc0, 0x05, 0x00, 0x00, 0x00, // mov rax, 5
+            0x48, 0xf7, 0xf1, // div rcx
+            0x48, 0x89, 0xc3, // mov rbx, rax
+            0xc3, // ret
+        ];
+        let text: String = lines_x64_raw(code)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("div"),
+            "the division should still be shown: {text}"
+        );
+        assert!(
+            !text.contains("rbx = 0x5"),
+            "the value from before the division must not survive it: {text}"
+        );
+    }
+
+    #[test]
+    fn a_store_feeding_an_unmodelled_instruction_is_not_dead() {
+        // mov rcx, 7 ; div rcx ; ret
+        //
+        // Nothing the decompiler models reads rcx, so without the unmodelled
+        // instruction's own reads the store looks dead and is deleted — taking
+        // the divisor out of the listing.
+        let code = vec![
+            0x48, 0xc7, 0xc1, 0x07, 0x00, 0x00, 0x00, // mov rcx, 7
+            0x48, 0xf7, 0xf1, // div rcx
+            0xc3, // ret
+        ];
+        let text: String = lines_x64_raw(code)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("0x7"),
+            "the divisor must survive dead-store elimination: {text}"
+        );
     }
 
     /// Build a 32-bit function from raw code that supplies its own control flow
