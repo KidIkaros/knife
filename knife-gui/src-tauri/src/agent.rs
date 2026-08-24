@@ -39,7 +39,9 @@ static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 ///
 /// Reading a binary genuinely takes several steps — list the functions, look at
 /// one, follow a call, check what reaches it — so this is not a tight budget.
-/// What matters more is what happens at the end of it: see `force_answer`.
+/// What matters more is what happens at the end of it: rather than discarding
+/// the work, the turn asks once more with the tools turned off, so the reading
+/// it did becomes an answer instead of nothing.
 const MAX_TOOL_ROUNDS: usize = 16;
 
 /// How many times one request is attempted before the turn gives up. The models
@@ -50,6 +52,18 @@ const MAX_ATTEMPTS: u32 = 4;
 /// A ceiling on the tool calls one reply may open. The index comes from the
 /// model, and a vector grown to meet it is memory a reply gets to choose.
 const MAX_TOOL_CALLS: usize = 32;
+
+/// The most text one tool result may add to the conversation.
+///
+/// A result is not paid for once. It goes into the history, and the history is
+/// sent again in full on every remaining round, so four hundred rows of
+/// disassembly fetched in round two are still being sent in round sixteen — the
+/// cost of a turn grows with the square of its length. That is what puts this
+/// pane into a rate limit on budgets other tools stay comfortably inside.
+///
+/// The model is told when a result was cut and what to do about it, which is a
+/// better answer than a truncation it cannot see: ask a narrower question.
+const MAX_RESULT_CHARS: usize = 6000;
 /// Autopilot drives a whole investigation, so it gets a deeper tool budget.
 const AUTOPILOT_ROUNDS: usize = 40;
 
@@ -174,12 +188,28 @@ fn tool_schema() -> Value {
     let mut tools: Vec<Value> = reknife::tools::catalog()
         .into_iter()
         .map(|t| {
+            let mut params = t.params;
+            // The catalog is shared with the MCP server, which is a standalone
+            // process and genuinely has to be told which file to open. Here
+            // there is one open target and `run_tool` dispatches against it, so
+            // the argument is discarded — but every tool still demanded it, on
+            // every round. That is around five hundred tokens of schema per
+            // request, and a path the model has to invent for each call and then
+            // read back in the history, none of which anything looks at. The
+            // pane asks a great deal of a model with a small budget; this was a
+            // sizeable part of it going nowhere.
+            if let Some(props) = params.get_mut("properties").and_then(Value::as_object_mut) {
+                props.remove("file");
+            }
+            if let Some(req) = params.get_mut("required").and_then(Value::as_array_mut) {
+                req.retain(|r| r.as_str() != Some("file"));
+            }
             json!({
                 "type": "function",
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.params,
+                    "parameters": params,
                 }
             })
         })
@@ -793,9 +823,20 @@ async fn agent_turn(
                 args: t.args.clone(),
                 preview: result.chars().take(300).collect(),
             });
+            // Bounded before it enters the history, not just before it is shown.
+            let kept: String = result.chars().take(MAX_RESULT_CHARS).collect();
+            let stored = if kept.len() < result.len() {
+                format!(
+                    "{kept}\n\n[result truncated here. Ask something narrower — a single \
+                     function rather than the whole image, or a smaller count — rather than \
+                     assuming the rest is empty.]"
+                )
+            } else {
+                kept
+            };
             messages.push(ChatMessage {
                 role: "tool".into(),
-                content: Some(result),
+                content: Some(stored),
                 tool_calls: None,
                 tool_call_id: Some(t.id.clone()),
                 name: Some(t.name.clone()),
