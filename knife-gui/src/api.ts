@@ -45,6 +45,13 @@ export interface IrLine {
   text: string;
 }
 
+/// One window of the linear sweep, and where the next one begins.
+export interface Sweep {
+  lines: Line[];
+  start: number;
+  next: number | null;
+}
+
 export interface XrefRow {
   addr: string;
   kind: string;
@@ -345,10 +352,11 @@ export const api = {
   listFunctions: (filter?: string, namedOnly?: boolean, limit?: number) =>
     invoke<FnRow[]>("list_functions", { filter, namedOnly, limit }),
   disassemble: (selector: string) => invoke<Line[]>("disassemble", { selector }),
-  /// A linear sweep of the image from `at` (or the entry point). Forward only:
-  /// read on by asking again from the address after the last instruction.
-  disassembleLinear: (at?: string, count?: number) =>
-    invoke<Line[]>("disassemble_linear", { at, count }),
+  /// A window of the file read straight through, from a file offset (or an
+  /// address, when the caller has one). `next` is where the following window
+  /// starts — the decoder settles that boundary, so it is not guessable here.
+  disassembleLinear: (off?: number, at?: string, count?: number) =>
+    invoke<Sweep>("disassemble_linear", { off, at, count }),
   decompile: (selector: string) => invoke<IrLine[]>("decompile", { selector }),
   xrefs: (addr: string, direction: "to" | "from") =>
     invoke<XrefRow[]>("xrefs", { addr, direction }),

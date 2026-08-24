@@ -365,6 +365,20 @@ pub fn sections(bin: &Binary) -> Vec<SectionDto> {
         .collect()
 }
 
+/// One window of the linear sweep.
+///
+/// `next` is the file offset to continue from. It has to come back with the
+/// lines rather than be worked out from them: only the decoder knows how long
+/// the last instruction was, and a caller guessing at that boundary would resume
+/// inside an instruction and decode rubbish from there on. `None` means the end
+/// of the file.
+#[derive(Serialize)]
+pub struct SweepDto {
+    pub lines: Vec<LineDto>,
+    pub start: u64,
+    pub next: Option<u64>,
+}
+
 // ── navigator overview band ─────────────────────────────────────────────────
 
 /// One bucket of the whole-file navigator band: a slice of the image summarised

@@ -252,6 +252,53 @@ body {
   background: var(--critical);
 }
 
+/* ── linear sweep: the file's own reading, above its bytes ─────────────── */
+.lintriage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.lintriage b {
+  color: var(--text);
+  font-weight: 400;
+}
+
+.lintriage .tscore {
+  color: var(--faint);
+}
+
+.lintriage .tsep {
+  color: #3a3536;
+}
+
+.lintriage .tflag {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--amber);
+}
+
+.lintriage .tflag.ok {
+  color: var(--mint);
+  border-color: #1e4a3a;
+}
+
+.lintriage .tsignal {
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--faint);
+  font-style: italic;
+}
+
 /* ── linear sweep toolbar ─────────────────────────────────────────────── */
 .linbar {
   display: flex;

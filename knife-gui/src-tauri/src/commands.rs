@@ -5,7 +5,7 @@
 
 use crate::dto::{
     hex, AnnotDto, CfgDto, CfgEdge, CfgNode, FindingDto, FnRow, IrLineDto, LineDto, OpenResult,
-    OverviewBucket, OverviewDto, StringRow, XrefRow,
+    OverviewBucket, OverviewDto, StringRow, SweepDto, XrefRow,
 };
 use crate::state::{AppState, TargetRow};
 use anyhow::{anyhow, Result};
@@ -276,87 +276,258 @@ pub fn hex_dump(
         .map_err(|e| e.to_string())
 }
 
-/// A linear sweep of the image, rather than one recovered function.
+/// One stretch of the file that reads the same way all through it.
+///
+/// The file is not uniformly code. Sweeping it as if it were means decoding the
+/// DOS stub, the import tables and the resources as x86-64, which produces pages
+/// of instructions that never existed. Splitting it into stretches first is what
+/// lets each be shown as what it is.
+struct Region {
+    start: u64,
+    end: u64,
+    name: String,
+    /// Whether the bytes here are meant to be executed.
+    code: bool,
+}
+
+/// Cut the file into regions, in file order and covering all of it.
+///
+/// Everything before the first section is the container's own header — for a PE
+/// the DOS header, the stub, and the PE headers. Gaps between sections are
+/// alignment padding, and anything after the last one is an overlay: appended
+/// data that is not part of the image at all, which is where an installer keeps
+/// its payload and where a signature lives.
+fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
+    let mut secs: Vec<&reknife::model::Section> =
+        bin.sections.iter().filter(|s| s.file_size > 0).collect();
+    secs.sort_by_key(|s| s.file_off);
+
+    let mut out: Vec<Region> = Vec::new();
+    let mut at = 0u64;
+    for s in &secs {
+        if s.file_off > at {
+            out.push(Region {
+                start: at,
+                end: s.file_off,
+                name: if at == 0 {
+                    match bin.format {
+                        reknife::model::Format::Pe => "DOS header, stub, and PE headers".into(),
+                        _ => "container headers".into(),
+                    }
+                } else {
+                    "alignment padding".into()
+                },
+                code: false,
+            });
+        }
+        let end = (s.file_off + s.file_size).min(bin.size);
+        if end > s.file_off {
+            out.push(Region {
+                start: s.file_off,
+                end,
+                name: s.name.clone(),
+                code: s.exec,
+            });
+        }
+        at = at.max(end);
+    }
+    if bin.size > at {
+        out.push(Region {
+            start: at,
+            end: bin.size,
+            name: "overlay".into(),
+            code: false,
+        });
+    }
+    if out.is_empty() {
+        out.push(Region {
+            start: 0,
+            end: bin.size,
+            name: "file".into(),
+            code: false,
+        });
+    }
+    out
+}
+
+/// A window of the file read straight through, from `off` towards the end.
 ///
 /// The function views answer "what does this routine do". They cannot answer
-/// "what is actually at this address", because recovery only reaches code it can
-/// prove is reachable — anything it missed, and every byte between functions, is
-/// simply absent from the window. This decodes straight through from an anchor,
-/// the way `knife dis` does, so the whole image can be read end to end.
+/// "what is in this file", because recovery only reaches code it can prove is
+/// reachable — anything it missed, every byte between functions, and everything
+/// that is not code at all is simply absent from the window.
 ///
-/// Windowed, and forward only. x86 instructions vary in length, so there is no
-/// way to land in the middle of the stream and know you are on a boundary: a
-/// sweep is only trustworthy from a known start. `at` is that start — an address
-/// the caller trusts, or the entry point — and the caller reads on by asking
-/// again from the address after the last instruction returned.
+/// Addressed by file offset rather than by virtual address, which is what makes
+/// it whole: the DOS header and stub sit before the first section and the
+/// overlay sits after the last, so neither has an address in the image and
+/// neither could be reached by a sweep that thought in addresses. Regions that
+/// hold code are disassembled; everything else is shown as bytes.
+///
+/// Windowed and forward only: instruction lengths vary and the decoder does not
+/// resynchronise, so a sweep is only honest from a boundary it was given. The
+/// reply carries the offset to continue from, which is the only place that
+/// boundary is known.
 #[tauri::command]
 pub fn disassemble_linear(
     state: State<AppState>,
+    off: Option<u64>,
     at: Option<String>,
     count: Option<usize>,
-) -> Result<Vec<LineDto>, String> {
-    let want = count.unwrap_or(2000).clamp(1, 20000);
+) -> Result<SweepDto, String> {
+    let want = count.unwrap_or(1500).clamp(1, 20000);
     state
         .read(|l| {
             let bin = &l.session.bin;
             let an = &l.session.an;
-            if !disasm::supported(bin.arch) {
-                return Err(anyhow!(
-                    "disassembly supports x86/x64 and AArch64; this is {}",
-                    bin.arch.label()
-                ));
-            }
-            let (foff, va) = match at.as_deref() {
-                Some(s) => {
+            let bytes = &l.session.bytes;
+
+            // An address, when the caller has one — "sweep from the function I am
+            // reading" — otherwise a plain offset, defaulting to the top of the
+            // file so the sweep genuinely starts at the start.
+            let mut cursor = match (off, at.as_deref()) {
+                (Some(o), _) => o,
+                (None, Some(s)) => {
                     let va = parse_addr(s)?;
-                    // `engine::va_to_off`, not `disasm::vaddr_to_off`: the window
-                    // shows absolute addresses, and the latter wants a PE RVA —
-                    // handing it one of ours means it never matches a section.
-                    let off = engine::va_to_off(bin, l.base, va)
-                        .ok_or_else(|| anyhow!("{s} is not in any section"))?;
-                    (off as u64, va)
+                    engine::va_to_off(bin, l.base, va)
+                        .ok_or_else(|| anyhow!("{s} is not in any section"))?
+                        as u64
                 }
-                None => disasm::entry_location(bin, &l.session.bytes)
-                    .ok_or_else(|| anyhow!("cannot locate the entry point"))?,
+                (None, None) => 0,
             };
+            let start = cursor;
+            if cursor >= bin.size {
+                return Ok(SweepDto {
+                    lines: Vec::new(),
+                    start,
+                    next: None,
+                });
+            }
 
-            let insns = disasm::disassemble(&l.session.bytes, foff, va, bin.bits, bin.arch, want);
+            let regions = regions(bin);
+            let mut out: Vec<LineDto> = Vec::new();
+            let entry_off = disasm::entry_location(bin, bytes).map(|(o, _)| o);
 
-            let mut out = Vec::with_capacity(insns.len() + 16);
-            for i in &insns {
-                // A function start is where the reader gets their bearings, so
-                // the name goes in as its own line the way the function view
-                // writes one. Without them a linear sweep is an undifferentiated
-                // wall and you cannot tell one routine from the next.
-                if let Some(f) = an.find_function(i.addr) {
-                    if f.addr == i.addr {
-                        out.push(LineDto::Label {
-                            addr: hex(i.addr),
-                            text: format!("{}:", f.name),
+            while out.len() < want && cursor < bin.size {
+                let Some(r) = regions.iter().find(|r| cursor >= r.start && cursor < r.end) else {
+                    break;
+                };
+                let before = cursor;
+
+                // Name the stretch as it is entered, so a reader always knows
+                // whether they are looking at code, at a table, or at bytes
+                // appended after the image.
+                if cursor == r.start || out.is_empty() {
+                    out.push(LineDto::Label {
+                        addr: hex(cursor),
+                        text: format!(
+                            "── {} · {} ──",
+                            r.name,
+                            if r.code { "code" } else { "data" }
+                        ),
+                    });
+                }
+
+                if r.code && disasm::supported(bin.arch) {
+                    let va = engine::off_to_va(bin, l.base, cursor).unwrap_or(cursor);
+                    let room = want.saturating_sub(out.len()).max(1);
+                    let insns = disasm::disassemble(bytes, cursor, va, bin.bits, bin.arch, room);
+                    if insns.is_empty() {
+                        cursor = r.end;
+                        continue;
+                    }
+                    for i in &insns {
+                        let ilen = i.bytes.len() as u64;
+                        // Stop at the region edge rather than running the decoder
+                        // on into whatever follows it.
+                        if cursor + ilen > r.end {
+                            break;
+                        }
+                        if Some(cursor) == entry_off {
+                            out.push(LineDto::Label {
+                                addr: hex(i.addr),
+                                text: "entry point:".into(),
+                            });
+                        }
+                        // A function start is where a reader gets their bearings.
+                        // Without them a sweep is an undifferentiated wall and one
+                        // routine cannot be told from the next.
+                        if let Some(f) = an.find_function(i.addr) {
+                            if f.addr == i.addr && Some(cursor) != entry_off {
+                                out.push(LineDto::Label {
+                                    addr: hex(i.addr),
+                                    text: format!("{}:", f.name),
+                                });
+                            }
+                        }
+                        let (mnemonic, operands) = match i.text.split_once(char::is_whitespace) {
+                            Some((m, rest)) => (m.to_string(), rest.trim_start().to_string()),
+                            None => (i.text.clone(), String::new()),
+                        };
+                        // Name what a branch or call points at, and make it
+                        // followable, by reading the target back out of the
+                        // operand text.
+                        let target = trailing_addr(&operands).filter(|t| {
+                            an.find_function(*t).is_some() || an.imports.contains_key(t)
                         });
+                        let annot = target.map(|t| AnnotDto {
+                            kind: "symbol",
+                            text: an.label(t),
+                        });
+                        out.push(LineDto::Insn {
+                            addr: hex(i.addr),
+                            mnemonic,
+                            operands,
+                            annot,
+                            target: target.map(hex),
+                        });
+                        cursor += ilen;
+                    }
+                } else {
+                    // Bytes, sixteen to a line, with the printable ones beside
+                    // them — the DOS stub's message is readable this way, and a
+                    // table looks like a table instead of like broken code.
+                    while out.len() < want && cursor < r.end {
+                        let end = (cursor + 16).min(r.end).min(bin.size);
+                        let chunk = &bytes[cursor as usize..end as usize];
+                        let hexs: String = chunk
+                            .iter()
+                            .map(|b| format!("{b:02x} "))
+                            .collect::<String>();
+                        let ascii: String = chunk
+                            .iter()
+                            .map(|&b| {
+                                if (0x20..=0x7e).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect();
+                        out.push(LineDto::Data {
+                            addr: hex(engine::off_to_va(bin, l.base, cursor).unwrap_or(cursor)),
+                            text: format!("{hexs:<48} {ascii}"),
+                        });
+                        cursor = end;
                     }
                 }
-                let (mnemonic, operands) = match i.text.split_once(char::is_whitespace) {
-                    Some((m, rest)) => (m.to_string(), rest.trim_start().to_string()),
-                    None => (i.text.clone(), String::new()),
-                };
-                // Name what a branch or call points at, and make it followable,
-                // by reading the target back out of the operand text.
-                let target = trailing_addr(&operands)
-                    .filter(|t| an.find_function(*t).is_some() || an.imports.contains_key(t));
-                let annot = target.map(|t| AnnotDto {
-                    kind: "symbol",
-                    text: an.label(t),
-                });
-                out.push(LineDto::Insn {
-                    addr: hex(i.addr),
-                    mnemonic,
-                    operands,
-                    annot,
-                    target: target.map(hex),
-                });
+
+                // Whatever happened above, the cursor has to have moved. An
+                // instruction straddling the end of its region consumes nothing
+                // and would otherwise be reconsidered forever; the rest of that
+                // region is not decodable from here, so step over it.
+                if cursor == before {
+                    if out.len() >= want {
+                        break;
+                    }
+                    cursor = r.end;
+                }
             }
-            Ok(out)
+
+            Ok(SweepDto {
+                lines: out,
+                start,
+                next: (cursor < bin.size).then_some(cursor),
+            })
         })
         .map_err(|e| e.to_string())
 }

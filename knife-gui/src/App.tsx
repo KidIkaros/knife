@@ -246,7 +246,9 @@ export default function App() {
   const [linear, setLinear] = useState<Line[]>([]);
   const [linearAt, setLinearAt] = useState<string | null>(null);
   const [linearBusy, setLinearBusy] = useState(false);
-  const [linearEnd, setLinearEnd] = useState(false);
+  // Where the next window starts. The backend hands this back because only the
+  // decoder knows where the last instruction ended; `null` is end of file.
+  const [linearNext, setLinearNext] = useState<number | null>(null);
   // Why the sweep has nothing, when it has nothing. Held rather than toasted: a
   // failed sweep leaves the tab empty, which is the condition that asks for the
   // sweep, so a toast per attempt turns one bad anchor into a stack of them.
@@ -538,53 +540,42 @@ export default function App() {
 
   /// Start the linear sweep somewhere: an address, or the entry point when the
   /// caller has nowhere particular in mind. Replaces whatever was there.
-  const seekLinear = useCallback(
-    async (at?: string) => {
-      setLinearBusy(true);
-      setLinearError(null);
-      try {
-        const rows = await api.disassembleLinear(at, 1500);
-        setLinear(rows);
-        setLinearAt(at ?? null);
-        setLinearEnd(rows.length === 0);
-      } catch (e) {
-        setLinear([]);
-        setLinearError(String(e).replace(/^Error:\s*/i, ""));
-      } finally {
-        setLinearBusy(false);
-      }
-    },
-    [],
-  );
-
-  /// Read on from where the sweep stopped.
-  ///
-  /// The next window is asked for from the last instruction's own address, not
-  /// from the byte after it. Only the decoder knows how long that instruction
-  /// was, and it does not resynchronise: pointed one byte in, it would decode
-  /// the tail of an instruction as if it were the start of one and every line
-  /// after would be rubbish. Asking from the last address decodes it a second
-  /// time and then continues correctly, so the repeat is simply dropped.
-  const moreLinear = useCallback(async () => {
-    if (linearBusy || linearEnd || !linear.length) return;
-    // A label carries the address of the instruction beneath it, so anchor on
-    // the last real instruction rather than whatever line happens to be last.
-    const lastInsn = [...linear].reverse().find((l) => l.kind === "insn");
-    if (!lastInsn) return;
-    const from = lastInsn.addr;
+  const seekLinear = useCallback(async (opts?: { off?: number; at?: string }) => {
     setLinearBusy(true);
+    setLinearError(null);
     try {
-      const rows = await api.disassembleLinear(from, 1500);
-      const fresh = rows.filter((r) => BigInt(r.addr) > BigInt(from));
-      // Nothing past the anchor means the section ran out; stop asking.
-      if (!fresh.length) setLinearEnd(true);
-      else setLinear((all) => [...all, ...fresh]);
-    } catch {
-      setLinearEnd(true);
+      const w = await api.disassembleLinear(opts?.off, opts?.at, 1500);
+      setLinear(w.lines);
+      setLinearAt(opts?.at ?? null);
+      setLinearNext(w.next);
+    } catch (e) {
+      setLinear([]);
+      setLinearNext(null);
+      setLinearError(String(e).replace(/^Error:\s*/i, ""));
     } finally {
       setLinearBusy(false);
     }
-  }, [linear, linearBusy, linearEnd]);
+  }, []);
+
+  /// Read on from where the sweep stopped, at the offset it reported. Guessing
+  /// that boundary from the last line is what would resume inside an instruction
+  /// and decode rubbish from there on.
+  const moreLinear = useCallback(async () => {
+    if (linearBusy || linearNext === null) return;
+    setLinearBusy(true);
+    try {
+      const w = await api.disassembleLinear(linearNext, undefined, 1500);
+      if (!w.lines.length) setLinearNext(null);
+      else {
+        setLinear((all) => [...all, ...w.lines]);
+        setLinearNext(w.next);
+      }
+    } catch {
+      setLinearNext(null);
+    } finally {
+      setLinearBusy(false);
+    }
+  }, [linearBusy, linearNext]);
 
   /// Load every view for whichever target is currently active.
   const loadViews = useCallback(async () => {
@@ -656,7 +647,7 @@ export default function App() {
         setLines([]);
         setIr([]);
         setLinear([]);
-        setLinearEnd(false);
+        setLinearNext(null);
         setLinearError(null);
         setXrefs([]);
         setHistory([]);
@@ -703,7 +694,7 @@ export default function App() {
         setLines([]);
         setIr([]);
         setLinear([]);
-        setLinearEnd(false);
+        setLinearNext(null);
         setLinearError(null);
         setCfg(null);
         setCgraph(null);
@@ -1393,8 +1384,10 @@ export default function App() {
   // exactly what triggers this, so without it a failed anchor retries forever.
   useEffect(() => {
     if (tab !== "linear" || linear.length || linearBusy || linearError) return;
-    void seekLinear(current ?? undefined);
-  }, [tab, linear.length, linearBusy, linearError, current, seekLinear]);
+    // Start at the top of the file: the sweep's whole point is that it covers
+    // what the function views cannot, and that begins with the headers.
+    void seekLinear({ off: 0 });
+  }, [tab, linear.length, linearBusy, linearError, seekLinear]);
 
   // A newly opened function starts at its top. The scroll container outlives the
   // listing inside it, so without this you arrive halfway down a function because
@@ -2175,6 +2168,41 @@ export default function App() {
 
               {tab === "linear" ? (
                 <>
+                  {/* What the file is, before what is in it — the sweep opens on
+                      the headers, and this is the reading of them. */}
+                  {detail && (
+                    <div className="lintriage">
+                      <span className={"verdict " + detail.triage.verdict.replace(/\s+/g, "")}>
+                        {detail.triage.verdict}
+                      </span>
+                      <span className="tscore">score {detail.triage.score}</span>
+                      <span className="tsep">·</span>
+                      <span>
+                        {detail.format} · {detail.arch} · {detail.bits}-bit
+                      </span>
+                      <span className="tsep">·</span>
+                      <span>{(detail.size / (1 << 20)).toFixed(2)} MB</span>
+                      <span className="tsep">·</span>
+                      <span>
+                        base <b>{detail.image_base}</b>
+                      </span>
+                      <span className="tsep">·</span>
+                      <span>
+                        entry <b>{detail.entry}</b>
+                      </span>
+                      {detail.is_stripped && <span className="tflag">stripped</span>}
+                      {detail.signing.signed ? (
+                        <span className="tflag ok">signed</span>
+                      ) : (
+                        <span className="tflag">unsigned</span>
+                      )}
+                      {detail.triage.signals.slice(0, 2).map((s, i) => (
+                        <span key={i} className="tsignal" title={s.text}>
+                          {s.text}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="linbar">
                     <span className={"linwhere" + (linearError ? " bad" : "")}>
                       {linearError
@@ -2185,16 +2213,32 @@ export default function App() {
                             ? "sweeping…"
                             : "nothing decoded"}
                     </span>
-                    {!linearError && <span className="lincount">{linear.length} lines</span>}
+                    {!linearError && (
+                      <span className="lincount">
+                        {linear.length} lines{linearNext === null ? " · end of file" : ""}
+                      </span>
+                    )}
                     <div className="spacer" />
-                    <button className="act" onClick={() => void seekLinear(undefined)}>
+                    <button
+                      className="act"
+                      title="the top of the file — headers first"
+                      onClick={() => void seekLinear({ off: 0 })}
+                    >
+                      top
+                    </button>
+                    <button
+                      className="act"
+                      disabled={!detail}
+                      title="where execution starts"
+                      onClick={() => detail && void seekLinear({ at: detail.entry })}
+                    >
                       entry
                     </button>
                     <button
                       className="act"
                       disabled={!current}
                       title="sweep from the function you have open"
-                      onClick={() => current && void seekLinear(current)}
+                      onClick={() => current && void seekLinear({ at: current })}
                     >
                       here
                     </button>
@@ -2203,7 +2247,7 @@ export default function App() {
                       title="sweep from an address"
                       onClick={() =>
                         ask("Sweep from", linearAt ?? "", "an address in a mapped section", (v) => {
-                          if (v.trim()) void seekLinear(v.trim());
+                          if (v.trim()) void seekLinear({ at: v.trim() });
                         })
                       }
                     >
