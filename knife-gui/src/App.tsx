@@ -1607,20 +1607,6 @@ export default function App() {
         </div>
       )}
 
-      {opened && (
-        <NavigatorBand
-          overview={overview}
-          current={selected ?? current}
-          onSeek={(va) => {
-            // A navigator click may land on code or data; the disassembly tab
-            // renders both (a data view for non-function addresses), so seek
-            // there. openFunction handles the resolve and the fallback.
-            setTab("disasm");
-            void openFunction(va);
-          }}
-        />
-      )}
-
       <div className="body">
         <div className="rail">
           <button
@@ -2438,6 +2424,20 @@ export default function App() {
                 </div>
               </>
             )}
+            {/* The whole file, down the far edge — outside the panes that
+                collapse, because an overview you have to open is not one. */}
+            <NavigatorBand
+              overview={overview}
+              current={selected ?? current}
+              orientation="vertical"
+              onSeek={(va) => {
+                // A click may land on code or on data; the disassembly tab
+                // renders both (a data view for a non-function address), so seek
+                // there and let openFunction resolve it.
+                setTab("disasm");
+                void openFunction(va);
+              }}
+            />
           </>
         )}
       </div>

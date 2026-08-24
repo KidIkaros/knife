@@ -48,17 +48,34 @@ function runsOf(buckets: OverviewBucket[]): Run[] {
 export function NavigatorBand({
   overview,
   current,
+  orientation = "horizontal",
   onSeek,
 }: {
   overview: Overview | null;
   /// Current/selected virtual address (hex), so the caret tracks navigation.
   current: string | null;
+  /// Which way the file runs. Vertical is a column down the right edge, where
+  /// the strip gets the window's height instead of its width.
+  orientation?: "horizontal" | "vertical";
   /// Seek to a virtual address — the parent opens the function or falls back to
   /// the hex inspector for a data region.
   onSeek: (va: string) => void;
 }) {
   const ref = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
+  const vert = orientation === "vertical";
+
+  // The shapes below are described in "along the file" and "across the strip"
+  // terms, and these two turn that into x/y. One set of rectangles then serves
+  // both orientations, instead of the whole picture being written twice.
+  const box = (along: number, cross: number, alongLen: number, crossLen: number) =>
+    vert
+      ? { x: cross, y: along, width: crossLen, height: alongLen }
+      : { x: along, y: cross, width: alongLen, height: crossLen };
+  const rule = (along: number) =>
+    vert
+      ? { x1: 0, x2: 100, y1: along, y2: along }
+      : { x1: along, x2: along, y1: 0, y2: 100 };
 
   const buckets = overview?.buckets ?? [];
   const n = buckets.length;
@@ -92,9 +109,11 @@ export function NavigatorBand({
 
   if (!overview || n === 0) return null;
 
-  const idxAt = (clientX: number): number => {
+  const idxAt = (e: { clientX: number; clientY: number }): number => {
     const rect = ref.current!.getBoundingClientRect();
-    const r = (clientX - rect.left) / rect.width;
+    const r = vert
+      ? (e.clientY - rect.top) / rect.height
+      : (e.clientX - rect.left) / rect.width;
     return Math.min(n - 1, Math.max(0, Math.floor(r * n)));
   };
 
@@ -114,58 +133,59 @@ export function NavigatorBand({
   const kb = (off: number) => (off / 1024).toFixed(off >= 1024 * 1024 ? 0 : 1);
 
   return (
-    <div className="navband">
-      {/* Every run is a tile in one flex row, so the captions tile the width
+    <div className={"navband" + (vert ? " vertical" : "")}>
+      {/* Captions only where there is width for them. A column is too narrow to
+          hold a section name, and the tooltip already gives it on hover.
+          Every run is a tile in one flex row, so the captions tile the width
           exactly and each centres over its own section. (Absolute positioning
           let a skipped run leave the others floating, which read as misplaced.)
           A run too narrow to hold its name keeps its space but shows nothing. */}
-      <div className="navband-labels">
-        {runs.map((run, i) => {
-          const w = ((run.end - run.start) / n) * 100;
-          return (
-            <span
-              key={i}
-              className={"navband-label" + (run.code ? " code" : "")}
-              style={{ flex: `0 0 ${w}%` }}
-              title={run.name ?? undefined}
-            >
-              {w >= 3.5 && run.name ? run.name : ""}
-            </span>
-          );
-        })}
-      </div>
+      {!vert && (
+        <div className="navband-labels">
+          {runs.map((run, i) => {
+            const w = ((run.end - run.start) / n) * 100;
+            return (
+              <span
+                key={i}
+                className={"navband-label" + (run.code ? " code" : "")}
+                style={{ flex: `0 0 ${w}%` }}
+                title={run.name ?? undefined}
+              >
+                {w >= 3.5 && run.name ? run.name : ""}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       <svg
         ref={ref}
         className="navband-track"
-        viewBox={`0 0 ${n} 100`}
+        viewBox={vert ? `0 0 100 ${n}` : `0 0 ${n} 100`}
         preserveAspectRatio="none"
-        onMouseMove={(e) => setHover(idxAt(e.clientX))}
+        onMouseMove={(e) => setHover(idxAt(e))}
         onMouseLeave={() => setHover(null)}
-        onClick={(e) => seek(idxAt(e.clientX))}
+        onClick={(e) => seek(idxAt(e))}
       >
         {/* entropy body */}
         {buckets.map((b, i) => (
-          <rect key={i} x={i} y={8} width={1.02} height={92} fill={entColor(b.entropy)} />
+          <rect key={i} {...box(i, 8, 1.02, 92)} fill={entColor(b.entropy)} />
         ))}
 
-        {/* code/data stripe along the top */}
+        {/* code/data stripe down the leading edge */}
         {runs.map((run, i) => (
           <rect
             key={i}
-            x={run.start}
-            y={0}
-            width={run.end - run.start}
-            height={7}
+            {...box(run.start, 0, run.end - run.start, 7)}
             fill={run.name ? (run.code ? "var(--accent)" : "var(--faint)") : "#201c1c"}
             opacity={run.code ? 0.85 : 0.5}
           />
         ))}
 
-        {/* findings heat lane along the bottom */}
+        {/* findings heat lane along the far edge */}
         {buckets.map((b, i) =>
           b.findings > 0 ? (
-            <rect key={i} x={i} y={80} width={1.4} height={20} fill={sevColor(b.max_sev)} />
+            <rect key={i} {...box(i, 80, 1.4, 20)} fill={sevColor(b.max_sev)} />
           ) : null,
         )}
 
@@ -173,10 +193,7 @@ export function NavigatorBand({
         {runs.slice(1).map((run, i) => (
           <line
             key={i}
-            x1={run.start}
-            x2={run.start}
-            y1={0}
-            y2={100}
+            {...rule(run.start)}
             stroke="var(--border)"
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
@@ -186,10 +203,7 @@ export function NavigatorBand({
         {/* entry point tick */}
         {overview.entry !== null && (
           <line
-            x1={overview.entry + 0.5}
-            x2={overview.entry + 0.5}
-            y1={0}
-            y2={100}
+            {...rule(overview.entry + 0.5)}
             stroke="var(--mint)"
             strokeWidth={1.5}
             strokeDasharray="2 2"
@@ -199,14 +213,18 @@ export function NavigatorBand({
 
         {/* current-position caret */}
         {caret !== null && (
-          <rect x={caret} y={0} width={caretW} height={100} className="navband-caret" />
+          <rect {...box(caret, 0, caretW, 100)} className="navband-caret" />
         )}
       </svg>
 
       {hb && (
         <div
           className="navband-tip"
-          style={{ left: `${Math.min(88, (hover! / n) * 100)}%` }}
+          style={
+            vert
+              ? { top: `${Math.min(92, (hover! / n) * 100)}%`, right: "100%" }
+              : { left: `${Math.min(88, (hover! / n) * 100)}%` }
+          }
         >
           <b>{hb.section ?? "unmapped"}</b>
           {hb.code ? " · code" : hb.section ? " · data" : ""} · {kb(hb.off)} KB

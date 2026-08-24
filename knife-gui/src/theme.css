@@ -404,6 +404,28 @@ body {
   cursor: crosshair;
 }
 
+/* The column down the right edge: the file gets the window's height instead of
+   its width, and the listing keeps the rows the horizontal band was taking. */
+.navband.vertical {
+  width: 18px;
+  flex: 0 0 18px;
+  height: 100%;
+  border-bottom: 0;
+  border-left: 1px solid var(--border);
+}
+
+.navband.vertical .navband-track {
+  width: 18px;
+  height: 100%;
+}
+
+/* The tooltip opens to the left of the column, since there is nothing to its
+   right but the window edge. */
+.navband.vertical .navband-tip {
+  top: 0;
+  margin-right: 6px;
+}
+
 .navband-caret {
   fill: var(--text);
   opacity: 0.9;
