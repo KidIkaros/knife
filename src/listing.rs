@@ -100,7 +100,7 @@ pub fn function(
                     Some(Annot::Local(format!("loc_{ta:x}")))
                 }
             } else {
-                string_annot(an, strings, ins.addr)
+                data_annot(an, strings, ins.addr)
             };
             // A field-name hint is the weakest annotation: only when there is
             // nothing more specific to say about this instruction.
@@ -122,9 +122,18 @@ pub fn function(
     out
 }
 
-/// Everything this instruction points at that lands inside a string literal,
-/// rendered as the literal itself.
-fn string_annot(an: &Analysis, strings: &BTreeMap<u64, Located>, addr: u64) -> Option<Annot> {
+/// What an instruction's data reference points at: the literal it lands in, or
+/// failing that the name of the thing at that address.
+///
+/// The name half was missing: unless the address landed inside a string, the
+/// line said nothing. Reading an import slot, or taking the address of a
+/// function, printed as a bare number even though the name was already known —
+/// the listing simply never asked for it.
+///
+/// Anonymous data stays a number, and should: the symbol table has no kind for
+/// a plain global, so there is no name to give it and inventing one would say
+/// more than is known.
+fn data_annot(an: &Analysis, strings: &BTreeMap<u64, Located>, addr: u64) -> Option<Annot> {
     for r in an.xrefs_from.get(&addr)? {
         if r.kind != XrefKind::Data {
             continue;
@@ -135,6 +144,11 @@ fn string_annot(an: &Analysis, strings: &BTreeMap<u64, Located>, addr: u64) -> O
             if *start <= r.to && r.to < start + s.len {
                 return Some(Annot::Text(s.text.clone()));
             }
+        }
+        // Not a literal, but the address may still have a name — a global the
+        // symbol table declares, or an import slot.
+        if let Some(name) = an.names.get(&r.to).or_else(|| an.imports.get(&r.to)) {
+            return Some(Annot::Symbol(name.clone()));
         }
     }
     None
@@ -219,6 +233,49 @@ mod tests {
         let mut bytes = vec![0u8; vaddr as usize];
         bytes.extend_from_slice(code);
         (bin, bytes)
+    }
+
+    #[test]
+    fn a_reference_to_a_named_address_is_annotated_with_its_name() {
+        // mov rax, [rip+0x1000] ; ret — the operand lands on an import slot, so
+        // the line should say which import. It used to say nothing at all
+        // unless the address happened to fall inside a string literal, which is
+        // how taking the address of an imported function read as a bare number.
+        let code = [
+            0x48, 0x8b, 0x05, 0x00, 0x10, 0x00, 0x00, // mov rax, [rip+0x1000]
+            0xc3, // ret
+        ];
+        let (mut bin, bytes) = code_at(0x1000, &code);
+        // The referenced address, in the data section that follows the code.
+        let global = 0x1007 + 0x1000;
+        bin.sections.push(Section {
+            name: ".data".into(),
+            vaddr: global,
+            vsize: 8,
+            file_off: global,
+            file_size: 8,
+            entropy: 0.0,
+            read: true,
+            write: true,
+            exec: false,
+        });
+        bin.symbols.push(crate::model::Symbol {
+            addr: global,
+            name: "GetLastError".into(),
+            kind: crate::model::SymKind::Import,
+        });
+        let mut bytes = bytes;
+        bytes.resize((global + 8) as usize, 0);
+        let an = engine::analyze(&bin, &bytes, 1000, &Db::default());
+        let f = an.find_function(0x1000).unwrap();
+        let lines = function(&an, f, &Db::default(), 0, &BTreeMap::new(), None);
+        assert!(
+            lines.iter().any(|l| matches!(
+                l,
+                Line::Insn { annot: Some(Annot::Symbol(n)), .. } if n == "GetLastError"
+            )),
+            "the import's name belongs on the line that reads its slot: {lines:?}"
+        );
     }
 
     #[test]
