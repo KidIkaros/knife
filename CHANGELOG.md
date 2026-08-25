@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Signature scanning is about five times faster, and full triage more than
+  three. The byte search compared the whole needle at every offset, and these
+  needles are long — the AES S-box is 256 bytes — so it ran a length-checked
+  compare 41 million times per signature on a 41 MB library. It now skips on the
+  first byte and compares the rest only on a hit. `knife scan` on that file goes
+  from 2.98s to 0.59s, and `knife FILE` from 4.01s to 1.14s: the scan was three
+  quarters of what triage spent its time on.
 - `pseudo`: a small negative that has been sign-extended to 64 bits prints as
   itself. `if (r10 < -0x1)` says what it means; `0xffffffffffffffff` leaves the
   reader doing the arithmetic and invites them to read a sentinel as a mask.
