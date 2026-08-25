@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The refusal a session gives on an unsupported architecture named the wrong
+  set: it said x86/x64 on a gate that accepts AArch64 as well, so it described
+  a narrower tool than the one refusing.
 - `docs/MCP.md`: what the MCP server is, how to register it with Claude Code,
   Claude Desktop and Cursor, the full table of thirty tools, a worked session,
   and why the transport is stdio. It had one row in the README's command table,

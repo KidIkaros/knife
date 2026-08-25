@@ -1194,7 +1194,7 @@ fn cmd_tui(file: &str, db_path: Option<&str>) -> Result<()> {
     };
     if !disasm::supported(bin.arch) {
         anyhow::bail!(
-            "the interactive view needs x86/x64 disassembly; this is {}",
+            "the interactive view needs x86, x64, or AArch64 disassembly; this is {}",
             bin.arch.label()
         );
     }

@@ -29,7 +29,7 @@ impl Session {
         };
         if !disasm::supported(bin.arch) {
             anyhow::bail!(
-                "{need} needs x86/x64 disassembly; this is {}",
+                "{need} needs x86, x64, or AArch64 disassembly; this is {}",
                 bin.arch.label()
             );
         }
