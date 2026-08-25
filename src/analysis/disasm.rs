@@ -67,6 +67,18 @@ pub fn supported(arch: Arch) -> bool {
     arch.is_x86() || arch == Arch::Aarch64
 }
 
+/// Whether the passes that *lift* instructions can run on this architecture.
+///
+/// Deliberately narrower than `supported`. Disassembly covers AArch64, but the
+/// decompiler, the bug audit and the driver pass all decode with `iced_x86`
+/// regardless of the target — so on an AArch64 image they read four-byte ARM
+/// words as x86, and what they produce is not a poorer answer but a fictional
+/// one: statements about `rax` on a machine that has no `rax`. Anything that
+/// lifts asks this question, not the other one.
+pub fn lifting_supported(arch: Arch) -> bool {
+    arch.is_x86()
+}
+
 /// Disassemble up to `count` instructions from `file_off`, presenting addresses
 /// as if the code were loaded at `va`.
 pub fn disassemble(

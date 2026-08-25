@@ -2090,6 +2090,12 @@ fn print_disasm(insns: &[disasm::Insn]) -> Result<()> {
 /// Recover what a driver exposes: devices, IRP dispatch, IOCTLs, primitives.
 fn cmd_drv(file: &str, reachable_only: bool, as_json: bool, db_path: Option<&str>) -> Result<()> {
     let s = Session::open(file, db_path, ANALYSIS_BUDGET, "driver analysis")?;
+    if !disasm::lifting_supported(s.bin.arch) {
+        anyhow::bail!(
+            "driver analysis is x86/x64 only; this is {}. The dispatch table and              IOCTL decode both read x86.",
+            s.bin.arch.label()
+        );
+    }
     let an = &s.an;
     let strings = listing::string_map(&s.bin, &s.bytes, engine::display_base(&s.bin));
     let mut rep = driver::report(&s.bin, &s.bytes, an, &strings);
@@ -2855,6 +2861,12 @@ fn dis_function(sess: &Session, sel: &str) -> Result<()> {
 
 fn cmd_pseudo(file: &str, sel: &str, db_path: Option<&str>) -> Result<()> {
     let sess = Session::open(file, db_path, ANALYSIS_BUDGET, "the pseudocode view")?;
+    if !disasm::lifting_supported(sess.bin.arch) {
+        anyhow::bail!(
+            "the pseudocode view is x86/x64 only; this is {}. Try `knife dis`.",
+            sess.bin.arch.label()
+        );
+    }
     let an = &sess.an;
 
     let func = if let Some(f) = an.find_by_name(sel) {

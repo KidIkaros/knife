@@ -207,8 +207,6 @@ fn kernel_api_set() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Cheap identity check (no engine pass): is this likely a kernel driver, so
-/// worth the full `report` walk? Subsystem = native, or a `.sys`/`.drv` name.
 /// Whether the image links against the kernel executive.
 ///
 /// This is the line between a driver and the kernel itself. A driver calls the
@@ -306,6 +304,14 @@ pub fn report(
         why.push("native subsystem, imports the kernel".into());
     }
     let is_driver = !why.is_empty();
+    // Still a driver, but the surface below cannot be read on this machine, and
+    // an empty dispatch table should not be mistaken for a driver that has none.
+    if is_driver && !crate::analysis::disasm::lifting_supported(bin.arch) {
+        why.push(format!(
+            "kernel surface not read: the dispatch and IOCTL decode is x86/x64 only, this is {}",
+            bin.arch.label()
+        ));
+    }
     let module = std::path::Path::new(&bin.path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -548,6 +554,13 @@ fn decode_range(bin: &Binary, bytes: &[u8], f: &Function) -> Vec<(u64, iced_x86:
         .map(|b| b.end)
         .max()
         .unwrap_or(start + f.size);
+    // Every read below this point is an x86 decode. On another architecture it
+    // would not fail, it would succeed on the wrong instruction set and report a
+    // dispatch table and IOCTL codes that were never there. Nothing is the
+    // truthful answer; the report says why.
+    if !crate::analysis::disasm::lifting_supported(bin.arch) {
+        return Vec::new();
+    }
     let Some(off) = crate::analysis::disasm::vaddr_to_off(bin, start) else {
         return Vec::new();
     };

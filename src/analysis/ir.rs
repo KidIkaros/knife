@@ -150,6 +150,22 @@ pub fn decompile(
     strings: &BTreeMap<u64, Located>,
     db: &Db,
 ) -> Vec<Line> {
+    // Everything below decodes with `iced_x86`, whatever the target is. On an
+    // AArch64 image that reads four-byte ARM words as x86: most fail to decode
+    // and vanish, and the few that happen to form a valid x86 instruction are
+    // lifted as one. The result is not a rougher answer, it is an invented one —
+    // statements about `rax` on a machine with no `rax` — and it arrived with no
+    // warning at all. Say so instead, here rather than in each caller, so the
+    // terminal, the window and the agents all get the same honest reply.
+    if !crate::analysis::disasm::lifting_supported(an.arch) {
+        return vec![Line {
+            label: false,
+            text: format!(
+                "/* pseudocode is x86/x64 only; this image is {}.                  `knife dis` disassembles it. */",
+                an.arch.label()
+            ),
+        }];
+    }
     let win64 = bin.format == Format::Pe && an.bits == 64;
     let frame = has_frame_pointer(an, f);
 
@@ -4001,6 +4017,38 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.text.contains("/*") && l.text.contains("cpuid")));
+    }
+
+    #[test]
+    fn an_aarch64_image_is_refused_rather_than_decompiled_as_x86() {
+        // The lifter decodes with iced_x86 whatever the target is, so an ARM64
+        // word was being read as x86 and turned into statements about registers
+        // the machine does not have. It must say what it cannot do instead.
+        let bytes = crate::formats::fixture::elf_aarch64_call();
+        let bin = crate::formats::analyze("fixture", &bytes).unwrap();
+        assert_eq!(bin.arch, Arch::Aarch64, "fixture should be AArch64");
+        let an = engine::analyze(&bin, &bytes, 10_000, &Db::default());
+        let f = an.functions.first().expect("a recovered function");
+        let lines = decompile(&an, &bin, f, &BTreeMap::new(), &Db::default());
+        let text = lines
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            text.contains("x86/x64 only") && text.contains("AArch64"),
+            "should name what it cannot do: {text}"
+        );
+        // And must not have invented anything about x86 registers.
+        for reg in ["rax", "rcx", "rdx", "rsp", "eax"] {
+            assert!(
+                !text.contains(reg),
+                "invented an x86 register ({reg}) for an ARM64 image: {text}"
+            );
+        }
     }
 
     #[test]
