@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `mcp`: a frame that is not valid JSON, or one over the size limit, is answered
+  with a JSON-RPC parse error instead of being dropped. Dropping it kept the
+  stream framed but left a client that had sent a request waiting for a reply
+  that was never coming, and a hang says less about what went wrong than an
+  error does.
 - `mcp`: the handshake now carries the protocol's `instructions` field, so a
   client is told what knife is, that it never runs the target, to call `open`
   first, and to reach for `audit` before disassembling a binary function by

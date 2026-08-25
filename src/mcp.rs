@@ -100,15 +100,24 @@ pub fn run(target: Option<String>) -> Result<()> {
     };
 
     while let Some(frame) = read_frame(&mut reader)? {
+        // A frame we cannot read still gets an answer. Dropping it keeps the
+        // stream framed but leaves a client that sent a request waiting for a
+        // reply that is never coming, and a hang is a worse failure than an
+        // error: there is nothing on the wire to say what went wrong. The id is
+        // null because an unparseable frame is exactly the case where we do not
+        // know what it was.
         if frame.len() >= MAX_FRAME {
-            continue; // oversized frame: drain-and-drop, fail closed
+            // The rest of the line was drained, so the stream is still framed.
+            parse_error(&mut out, "frame exceeds the maximum size")?;
+            continue;
         }
         let line = String::from_utf8_lossy(&frame);
         if line.trim().is_empty() {
-            continue;
+            continue; // a blank line is not a message; there is nothing to answer
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue; // not JSON: ignore rather than crash the stream
+            parse_error(&mut out, "frame is not valid JSON")?;
+            continue;
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
@@ -144,6 +153,15 @@ pub fn run(target: Option<String>) -> Result<()> {
 
 fn ok(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+/// Answer a frame that could not be read at all, per JSON-RPC: a null id,
+/// because which request it was is precisely what we could not determine.
+fn parse_error(out: &mut impl Write, why: &str) -> Result<()> {
+    let reply = err(Value::Null, -32700, why);
+    writeln!(out, "{}", serde_json::to_string(&reply)?)?;
+    out.flush()?;
+    Ok(())
 }
 
 fn err(id: Value, code: i64, message: &str) -> Value {
@@ -476,6 +494,23 @@ mod tests {
             json!({ "params": { "name": "info", "arguments": { "file": "/no/such/file.bin" } } });
         let _ = call_tool(&named, &mut srv);
         assert_eq!(srv.target.as_deref(), Some("/no/such/file.bin"));
+    }
+
+    #[test]
+    fn an_unreadable_frame_is_answered_rather_than_dropped() {
+        let mut out: Vec<u8> = Vec::new();
+        parse_error(&mut out, "frame is not valid JSON").unwrap();
+        assert!(
+            out.ends_with(
+                b"
+"
+            ),
+            "the reply must be its own frame"
+        );
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert!(v["id"].is_null(), "an unreadable frame has no known id");
+        assert_eq!(v["error"]["code"], -32700);
     }
 
     #[test]
