@@ -3433,7 +3433,7 @@ fn render_expr(e: &Expr, r: Rx) -> String {
         // pointer to it (32-bit `push offset aString`), so read it as the text.
         Expr::Const(v) => match r.strings.get(v) {
             Some(s) => quote(&s.text),
-            None => format!("0x{v:x}"),
+            None => render_const(*v),
         },
         Expr::Reg(root, shown) => display_register(r, *root, *shown),
         Expr::Stack(off) => display_base(r, slot_name(*off)),
@@ -3521,6 +3521,24 @@ fn render_expr(e: &Expr, r: Rx) -> String {
 /// rules that decide whether the text means what the tree does. The trap is
 /// `&`, `^` and `|`, which bind *looser* than the comparisons — a mistake old
 /// enough to have its own compiler warning.
+/// A constant, written the way it most likely was. A small negative that has
+/// been sign-extended to 64 bits prints as itself: `cmp rax, -1` says what it
+/// means, where `0xffffffffffffffff` leaves the reader to do the arithmetic and
+/// invites them to read a sentinel as a mask.
+///
+/// Only where it is unambiguous — the whole top half set, so this is a widened
+/// negative and not a 32-bit value that happens to end in `f`s — and only for
+/// small magnitudes, so that a real mask such as `0xffffffff00000000` still
+/// prints as the mask it is.
+fn render_const(v: u64) -> String {
+    let signed = v as i64;
+    if v > u64::from(u32::MAX) && (-0x10000..0).contains(&signed) {
+        format!("-0x{:x}", signed.unsigned_abs())
+    } else {
+        format!("0x{v:x}")
+    }
+}
+
 fn precedence(op: &str) -> u8 {
     match op {
         "*" | "/" | "%" => 10,
@@ -4588,6 +4606,19 @@ mod tests {
             "a rep-driven block copy must stay verbatim:
 {text}"
         );
+    }
+
+    #[test]
+    fn a_widened_negative_prints_as_one_but_a_mask_keeps_its_shape() {
+        assert_eq!(render_const(0xffff_ffff_ffff_ffff), "-0x1");
+        assert_eq!(render_const(0xffff_ffff_ffff_fffe), "-0x2");
+        assert_eq!(render_const(0xffff_ffff_ffff_ffe0), "-0x20");
+        // A 32-bit all-ones is as much a mask as it is a -1, and nothing in the
+        // value says which, so it stays exactly as it was written.
+        assert_eq!(render_const(0xffff_ffff), "0xffffffff");
+        // A real 64-bit mask is not a small negative and keeps its shape.
+        assert_eq!(render_const(0xffff_ffff_0000_0000), "0xffffffff00000000");
+        assert_eq!(render_const(0x1c), "0x1c");
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `pseudo`: a small negative that has been sign-extended to 64 bits prints as
+  itself. `if (r10 < -0x1)` says what it means; `0xffffffffffffffff` leaves the
+  reader doing the arithmetic and invites them to read a sentinel as a mask.
+  Only where it is unambiguous, so `0xffffffff` and `0xffffffff00000000` are
+  untouched.
 - `pseudo`: `lea` used as arithmetic reads as arithmetic. Every `lea` produced
   an address-of, so the commonest use of the instruction — adding without
   touching the flags — printed as `&(rbx + 2)`: an operator the machine never
