@@ -1,7 +1,7 @@
 //! Mach-O → Binary. Fat binaries: the first architecture slice is used.
 
 use super::mk_section;
-use crate::model::{Arch, Binary, Format, HardeningFacts, ImportedLib};
+use crate::model::{Arch, Binary, Format, HardeningFacts, ImportedLib, SymKind, Symbol};
 use anyhow::{bail, Result};
 use goblin::mach::{Mach, MachO};
 
@@ -13,28 +13,67 @@ const VM_PROT_READ: u32 = 1;
 const VM_PROT_WRITE: u32 = 2;
 const VM_PROT_EXECUTE: u32 = 4;
 
-pub fn build(path: &str, bytes: &[u8], mach: Mach) -> Result<Binary> {
-    let macho = match mach {
-        Mach::Binary(m) => m,
-        Mach::Fat(fat) => match fat.into_iter().next() {
-            Some(Ok(goblin::mach::SingleArch::MachO(m))) => m,
-            _ => bail!("fat Mach-O: no usable architecture slice"),
-        },
-    };
-    Ok(build_one(path, bytes, macho))
-}
-
-fn build_one(path: &str, bytes: &[u8], m: MachO) -> Binary {
-    let ct = m.header.cputype;
-    let is64 = ct & CPU_ARCH_ABI64 != 0;
-    let base = ct & !CPU_ARCH_ABI64;
-    let arch = match base {
+/// The architecture a Mach-O CPU type names.
+fn arch_of(cputype: u32) -> Arch {
+    let is64 = cputype & CPU_ARCH_ABI64 != 0;
+    match cputype & !CPU_ARCH_ABI64 {
         CPU_TYPE_X86 if is64 => Arch::X86_64,
         CPU_TYPE_X86 => Arch::X86,
         CPU_TYPE_ARM if is64 => Arch::Aarch64,
         CPU_TYPE_ARM => Arch::Arm,
         _ => Arch::Other,
+    }
+}
+
+pub fn build(path: &str, bytes: &[u8], mach: Mach) -> Result<Binary> {
+    // A universal binary holds several images and only one can be analysed. The
+    // first is taken, as before, but silently choosing between architectures is
+    // how someone ends up reading the arm64 half of a file while believing they
+    // are looking at the x86-64 one — so it is written down.
+    //
+    // Bounded, and in one pass. The slice count is a number in the file, and a
+    // corrupt one can claim millions: walking all of them to list what is there
+    // turns a fixed cost into whatever the input asks for, which for a tool
+    // whose whole job is hostile input is not a listing feature but a way to be
+    // stopped. A universal binary carries a handful of slices; reading more than
+    // that says nothing extra.
+    const MAX_SLICES: usize = 8;
+    let (macho, note) = match mach {
+        Mach::Binary(m) => (m, None),
+        Mach::Fat(fat) => {
+            let mut names: Vec<String> = Vec::new();
+            let mut first: Option<MachO> = None;
+            for slice in fat.into_iter().take(MAX_SLICES) {
+                let Ok(goblin::mach::SingleArch::MachO(m)) = slice else {
+                    continue;
+                };
+                names.push(arch_of(m.header.cputype).label().to_string());
+                if first.is_none() {
+                    first = Some(m);
+                }
+            }
+            let Some(first) = first else {
+                bail!("fat Mach-O: no usable architecture slice");
+            };
+            let note = (names.len() > 1).then(|| {
+                format!(
+                    "universal binary; analysing the first of {} slices ({})",
+                    names.len(),
+                    names.join(", ")
+                )
+            });
+            (first, note)
+        }
     };
+    let mut out = build_one(path, bytes, macho);
+    out.notes.extend(note);
+    Ok(out)
+}
+
+fn build_one(path: &str, bytes: &[u8], m: MachO) -> Binary {
+    let ct = m.header.cputype;
+    let is64 = ct & CPU_ARCH_ABI64 != 0;
+    let arch = arch_of(ct);
 
     let mut sections = Vec::new();
     for seg in &m.segments {
@@ -104,6 +143,32 @@ fn build_one(path: &str, bytes: &[u8], m: MachO) -> Binary {
         "32-bit".into()
     });
 
+    // The symbol table goblin already parsed. PE and ELF both feed theirs to the
+    // engine; Mach-O was discarding its own and analysing from the entry point
+    // alone, so a binary with a full symbol table still read as `sub_…`
+    // throughout. Defined symbols in a section are the ones with an address
+    // worth having; undefined ones name imports and belong to the stub, not
+    // here.
+    let mut symbols: Vec<Symbol> = Vec::new();
+    for sym in m.symbols() {
+        let Ok((name, nl)) = sym else { continue };
+        if nl.is_stab() || nl.is_undefined() || nl.n_value == 0 {
+            continue;
+        }
+        if nl.get_type() != goblin::mach::symbols::N_SECT {
+            continue;
+        }
+        let name = name.strip_prefix('_').unwrap_or(name);
+        if name.is_empty() {
+            continue;
+        }
+        symbols.push(Symbol {
+            addr: nl.n_value,
+            name: name.to_string(),
+            kind: SymKind::Func,
+        });
+    }
+
     Binary {
         path: path.to_string(),
         size: bytes.len() as u64,
@@ -120,7 +185,7 @@ fn build_one(path: &str, bytes: &[u8], m: MachO) -> Binary {
         sections,
         imports,
         exports,
-        symbols: Vec::new(),
+        symbols,
         func_hints: Vec::new(),
         libs: m.libs.iter().map(|s| s.to_string()).collect(),
         rpaths: m.rpaths.iter().map(|s| s.to_string()).collect(),
