@@ -20,6 +20,40 @@ use std::io::{BufRead, Write};
 
 const PROTOCOL: &str = "2024-11-05";
 
+/// What the server tells a client about itself at handshake time. The protocol
+/// carries this to the model, and thirty tools with no word on which to reach
+/// for first is thirty tools an agent works out the hard way — usually by
+/// disassembling everything, when `audit` would have answered the question.
+const INSTRUCTIONS: &str = concat!(
+    "knife is a static reverse-engineering engine for PE, ELF and Mach-O. It reads\n",
+    "the bytes on disk and never executes the target, so it is safe to point at\n",
+    "malware.\n",
+    "\n",
+    "Call `open` with the path first: it binds the target, and every later call may\n",
+    "then omit `file`.\n",
+    "\n",
+    "Where to go next:\n",
+    "- `triage`, `hardening`, `signatures`, `entropy` — what the file is, whether it\n",
+    "  is packed, and what it is defended by.\n",
+    "- `audit` — dangerous call sites ranked by how exploitable their arguments look,\n",
+    "  worst first. This is what knife is for; reach for it before reading functions\n",
+    "  one at a time. `trace_taint` then says where one argument came from and which\n",
+    "  call chains reach it.\n",
+    "- `list_functions`, `disassemble`, `decompile` — the code itself. A selector is\n",
+    "  a function name or a hex address.\n",
+    "- `xrefs`, `callees`, `paths_to`, `call_graph` — how execution reaches a place.\n",
+    "- `strings`, `iocs`, `imports`, `exports`, `capabilities` — the behavioural\n",
+    "  surface. `driver_report` for Windows kernel drivers.\n",
+    "\n",
+    "Write down what you work out: `set_name`, `set_note` and `set_prototype` persist\n",
+    "beside the binary, so a function named once reads that way in every later\n",
+    "listing.\n",
+    "\n",
+    "Addresses are hex strings such as \"0x1400012a0\". Results are capped at 400 rows.\n",
+    "`decompile`, `audit`, `trace_taint` and `driver_report` lift x86/x64 only, and\n",
+    "refuse other architectures rather than guess at them.\n",
+);
+
 /// The largest single frame we will buffer. MCP frames are one JSON object per
 /// line; nothing this server does needs more, so a client that streams a huge
 /// line fails closed (the rest of the line is drained and dropped) instead of
@@ -125,6 +159,7 @@ fn initialize() -> Value {
         "protocolVersion": PROTOCOL,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "knife", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": INSTRUCTIONS,
     })
 }
 
@@ -369,6 +404,16 @@ mod tests {
         let init = initialize();
         assert_eq!(init["protocolVersion"], PROTOCOL);
         assert_eq!(init["serverInfo"]["name"], "knife");
+        // The handshake orients the client: it must at least say where to begin.
+        let guidance = init["instructions"].as_str().unwrap();
+        assert!(
+            guidance.contains("`open`"),
+            "instructions do not name `open`"
+        );
+        assert!(
+            guidance.contains("`audit`"),
+            "instructions do not name `audit`"
+        );
 
         let tools = tool_list();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();

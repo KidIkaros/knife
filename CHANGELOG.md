@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `mcp`: the handshake now carries the protocol's `instructions` field, so a
+  client is told what knife is, that it never runs the target, to call `open`
+  first, and to reach for `audit` before disassembling a binary function by
+  function. Thirty tools and no word on which one comes first is thirty tools an
+  agent works out the hard way.
 - `mcp`: a target the client no longer has to keep naming. `knife mcp --file
   PATH` binds a binary up front, the new `open` tool binds or replaces one
   mid-session, and `file` is optional on all thirty tools. An agent repeating an
