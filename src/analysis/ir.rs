@@ -837,10 +837,23 @@ fn lift_insn(
     let stmt: Option<Stmt> = match d.mnemonic() {
         Nop | Endbr32 | Endbr64 => None,
         Mov | Movzx | Movsx | Movsxd => Some(Stmt::Set(dest(d, st), operand(d, st, 1))),
-        Lea => Some(Stmt::Set(
-            dest(d, st),
-            Expr::Addr(Box::new(mem_addr(d, st))),
-        )),
+        Lea => {
+            // `lea` computes an address expression. Where that expression names
+            // storage — a frame slot, a global — the value is its address and
+            // reads as `&name`. Where it is arithmetic, the value *is* the
+            // arithmetic: `lea ebx, [ebx+2]` is how a compiler writes `ebx + 2`
+            // without touching the flags, and `&(ebx + 2)` both adds an
+            // operator the machine never applied and says something C does not
+            // have — a sum has no address to take.
+            let address = mem_addr(d, st);
+            Some(Stmt::Set(
+                dest(d, st),
+                match address {
+                    Expr::Stack(_) | Expr::Global(_) => Expr::Addr(Box::new(address)),
+                    computed => computed,
+                },
+            ))
+        }
         Add => Some(binset(st, "+")),
         Sub => Some(binset(st, "-")),
         And => Some(binset(st, "&")),
@@ -4105,6 +4118,10 @@ mod tests {
         // mov eax,[ebp+8]; add eax,0x1c; push eax; lea eax,[ebp-0x28]; push eax; call
         // The two eax computations feed the call and are dead afterward, so only
         // the call statement should survive.
+        //
+        // Nothing establishes ebp as a frame pointer here, so the `lea` stays
+        // raw arithmetic: its value is `ebp - 0x28`, and that is what it says.
+        // A function with a real prologue gets `&var_28` instead.
         let code = vec![
             0x8b, 0x45, 0x08, 0x83, 0xc0, 0x1c, 0x50, 0x8d, 0x45, 0xd8, 0x50,
         ];
@@ -4118,7 +4135,7 @@ mod tests {
         assert!(
             stmts
                 .iter()
-                .any(|s| s.contains("lstrcpyA(&(ebp - 0x28), *(ebp + 0x8) + 0x1c)")),
+                .any(|s| s.contains("lstrcpyA(ebp - 0x28, *(ebp + 0x8) + 0x1c)")),
             "call with propagated args, got: {stmts:?}"
         );
         // The intermediate loads that fed the arguments are dead and removed:

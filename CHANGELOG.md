@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `pseudo`: `lea` used as arithmetic reads as arithmetic. Every `lea` produced
+  an address-of, so the commonest use of the instruction — adding without
+  touching the flags — printed as `&(rbx + 2)`: an operator the machine never
+  applied, around something C has no address for. It now yields `&name` only
+  where the address names storage, a frame slot or a global, and the plain
+  expression everywhere else. `lea` is 5% of the instructions in ucrtbase.dll.
 - `pseudo`: scalar floating point is decompiled. Moves, `+`/`-`/`*`/`/`, the
   `xorps xmm, xmm` that writes zero, the `comis`/`ucomis` compares that feed a
   branch, and the conversions as C casts. Two thirds of everything this lifter
