@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `docs/MCP.md`: what the MCP server is, how to register it with Claude Code,
+  Claude Desktop and Cursor, the full table of thirty tools, a worked session,
+  and why the transport is stdio. It had one row in the README's command table,
+  which is not enough for anyone to install it.
 - `mcp`: a frame that is not valid JSON, or one over the size limit, is answered
   with a JSON-RPC parse error instead of being dropped. Dropping it kept the
   stream framed but left a client that had sent a request waiting for a reply

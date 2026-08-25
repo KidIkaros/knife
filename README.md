@@ -86,7 +86,7 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife graph FILE [--from FUNC] [--reachable] [--dot]` | whole-program call graph, optionally rooted or Graphviz-ready |
 | `knife graph FILE --func FUNC [--dot]` | one function's control-flow graph as text, JSON, or DOT |
 | `knife tui FILE` | interactive: functions, listing, xrefs, naming and notes |
-| `knife mcp` | Model Context Protocol server over stdio (tools for agents) |
+| `knife mcp [--file F]` | Model Context Protocol server over stdio (tools for agents) |
 | `knife name FILE ADDR NAME` | name an address; every later command uses it |
 | `knife note FILE ADDR TEXT` | annotate an address; shows up in the disassembly |
 | `knife field FILE --type TYPE OFFSET NAME [--data-type CTYPE]` | define a reusable, optionally typed structure field |
@@ -122,6 +122,30 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 Add `--json` to any analysis command for machine-readable output. `knife FILE`
 is shorthand for `knife info FILE`, and `knife FILE --rules DIR` folds a YARA
 pass into the verdict.
+
+## Agents
+
+`knife mcp` serves every analysis above over the
+[Model Context Protocol](https://modelcontextprotocol.io), so an agent drives the
+same engine the command line does: recover functions, read pseudocode, rank the
+call sites whose arguments look exploitable, trace one back to where its length
+came from, and write names, notes and prototypes into the database.
+
+```bash
+claude mcp add knife -- knife mcp
+```
+
+or, for a client configured with JSON:
+
+```json
+{ "mcpServers": { "knife": { "command": "knife", "args": ["mcp"] } } }
+```
+
+Thirty tools. Bind a binary once — `knife mcp --file PATH`, or the `open` tool —
+and nothing after it needs a path. Being static, the server cannot run the sample
+it is reading, which is what makes it safe to hand an agent a piece of malware.
+
+Full tool table and per-client setup: **[docs/MCP.md](docs/MCP.md)**.
 
 ## For vulnerability research
 
