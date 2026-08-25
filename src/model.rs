@@ -209,6 +209,10 @@ pub struct Binary {
     pub sig_region: Option<(u64, u64)>,
     /// Container facts for the exploit-mitigation audit (`knife sec`).
     pub hardening: HardeningFacts,
+    /// How the search for a symbol file went. A name that came from a PDB and a
+    /// name a heuristic guessed at should not look alike, so the outcome is
+    /// carried rather than inferred from whether names happen to exist.
+    pub pdb: crate::formats::pdbsym::Pdb,
     pub notes: Vec<String>,
 }
 
@@ -251,6 +255,7 @@ impl Binary {
             has_signature: false,
             sig_region: None,
             hardening: HardeningFacts::default(),
+            pdb: crate::formats::pdbsym::Pdb::NotReferenced,
             notes: Vec::new(),
         }
     }

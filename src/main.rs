@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     db: Option<String>,
 
+    /// Read function names from this PDB instead of looking beside the binary.
+    #[arg(long, global = true, value_name = "PATH")]
+    pdb: Option<String>,
+
     #[command(subcommand)]
     cmd: Command,
 }
@@ -377,6 +381,8 @@ fn real_main() -> Result<()> {
     }
 
     let cli = Cli::parse_from(args);
+    // Set before any parse: the PE builder reads it while constructing `Binary`.
+    formats::pdbsym::set_override(cli.pdb.clone());
     match cli.cmd {
         Command::Info { file, rules } => cmd_info(&file, rules.as_deref(), cli.json),
         Command::Sections { file } => cmd_sections(&file, cli.json),
@@ -1404,6 +1410,7 @@ fn cmd_info(file: &str, rules: Option<&str>, as_json: bool) -> Result<()> {
             "size": bin.size,
             "is_lib": bin.is_lib,
             "stripped": bin.is_stripped,
+            "symbols": bin.pdb,
             "entry": bin.entry,
             "image_base": bin.image_base,
             "subsystem": bin.subsystem,
@@ -1447,6 +1454,11 @@ fn cmd_info(file: &str, rules: Option<&str>, as_json: bool) -> Result<()> {
         kv("subsystem", sub);
     }
     kv("entry", format!("0x{:x}", bin.entry));
+    // Where the names came from. A name read from a symbol file and a name a
+    // heuristic guessed at read identically in a listing, so say which.
+    if bin.pdb != formats::pdbsym::Pdb::NotReferenced {
+        kv("symbols", bin.pdb.summary());
+    }
     if bin.image_base != 0 {
         kv("imagebase", format!("0x{:x}", bin.image_base));
     }

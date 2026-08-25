@@ -5,6 +5,7 @@ mod elf;
 #[doc(hidden)]
 pub mod fixture;
 mod macho;
+pub mod pdbsym;
 mod pe;
 
 use crate::analysis::entropy::entropy;

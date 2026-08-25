@@ -252,6 +252,8 @@ pub fn build(path: &str, bytes: &[u8], elf: Elf) -> Binary {
         overlay_entropy: 0.0,
         has_signature: false,
         sig_region: None,
+        // ELF debug info is DWARF, not a PDB sidecar.
+        pdb: crate::formats::pdbsym::Pdb::NotReferenced,
         hardening: HardeningFacts {
             gnu_stack_exec,
             gnu_relro,

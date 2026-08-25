@@ -121,6 +121,31 @@ pub fn build(path: &str, bytes: &[u8], pe: PE) -> Binary {
         });
     }
 
+    // Names from the PDB, when the executable names one and the file beside it
+    // is from the same build. goblin already parsed the debug directory; knife
+    // simply never asked it what was there.
+    let wanted = pe.debug_data.as_ref().and_then(|d| {
+        d.codeview_pdb70_debug_info.as_ref().map(|cv| {
+            crate::formats::pdbsym::Wanted {
+                // The recorded name is NUL-terminated inside the directory.
+                name: String::from_utf8_lossy(
+                    cv.filename.split(|b| *b == 0).next().unwrap_or(cv.filename),
+                )
+                .into_owned(),
+                guid: cv.signature,
+                age: cv.age,
+            }
+        })
+    });
+    let (pdb_symbols, pdb_state) = crate::formats::pdbsym::load(
+        path,
+        wanted,
+        crate::formats::pdbsym::override_path().as_deref(),
+    );
+    // Exports and the IAT stay ahead of the PDB: those are what the loader
+    // itself uses, and a public name is the one other images call by.
+    symbols.extend(pdb_symbols);
+
     let (subsystem, image_base, timestamp, has_sig, sig_region) =
         if let Some(oh) = pe.header.optional_header {
             let sub = subsystem_name(oh.windows_fields.subsystem);
@@ -211,6 +236,7 @@ pub fn build(path: &str, bytes: &[u8], pe: PE) -> Binary {
         overlay_entropy: 0.0,
         has_signature: has_sig,
         sig_region,
+        pdb: pdb_state,
         hardening: HardeningFacts {
             dll_characteristics,
             load_config,

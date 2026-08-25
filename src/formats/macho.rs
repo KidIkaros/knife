@@ -130,6 +130,8 @@ fn build_one(path: &str, bytes: &[u8], m: MachO) -> Binary {
         overlay_entropy: 0.0,
         has_signature: code_signature,
         sig_region: None,
+        // Mach-O debug info lives in a dSYM bundle, not a PDB.
+        pdb: crate::formats::pdbsym::Pdb::NotReferenced,
         hardening: HardeningFacts {
             macho_flags: Some(m.header.flags),
             code_signature,

@@ -54,6 +54,7 @@ pkg-fmt = "zip"
 
 [dependencies]
 goblin = "0.9"                 # PE / ELF / Mach-O / archive parsing, one crate
+pdb = "0.8"                    # Microsoft PDB symbols; pure Rust, no C toolchain
 iced-x86 = "1.21"             # x86/x64 disassembler, pure Rust
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
