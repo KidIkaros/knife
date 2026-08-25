@@ -689,8 +689,9 @@ fn is_imm(d: &Instruction, i: u32) -> bool {
 /// The callee-saved (nonvolatile) registers, whose prologue save and epilogue
 /// restore are ABI housekeeping with no observable effect.
 fn is_callee_saved(r: Register) -> bool {
+    let full = r.full_register();
     matches!(
-        r.full_register(),
+        full,
         Register::RBX
             | Register::RBP
             | Register::RSI
@@ -700,6 +701,12 @@ fn is_callee_saved(r: Register) -> bool {
             | Register::R14
             | Register::R15
     )
+        // xmm6-xmm15 are nonvolatile on Win64, so their prologue spill and
+        // epilogue reload are the same ABI bookkeeping the integer ones are —
+        // and now that the vector moves are lifted, they would otherwise show.
+        // Asked by number because `full_register` widens a vector register to
+        // its largest form: `XMM6` arrives here as `ZMM6`.
+        || (full.is_zmm() && (6..=15).contains(&full.number()))
 }
 
 /// Whether an address expression is a named stack slot.
@@ -890,6 +897,46 @@ fn lift_insn(
             };
             Some(Stmt::Set(reg(high), sign_fill(&reg_val(st, acc), width)))
         }
+        // Scalar floating point. Two thirds of what this lifter still could not
+        // read on a real C runtime was SSE, and a numeric function whose every
+        // arithmetic step is a comment is not decompiled at all. A copy is a
+        // copy and a multiply is a multiply whatever unit performs it; the
+        // registers print as `xmm0` and so say for themselves which unit that
+        // is. Only the scalar forms are taken — a packed operation works on
+        // several lanes at once and `a * b` would describe one of them.
+        //
+        // Guarded on an xmm operand because `movsd` is two instructions: the
+        // SSE move, and the string move that `rep` drives over memory. Reading
+        // a block copy as an assignment would be a bad way to learn that.
+        m if is_sse_move(m) && d.op_count() == 2 && touches_xmm(d) => {
+            Some(Stmt::Set(dest(d, st), operand(d, st, 1)))
+        }
+        Addsd | Addss if touches_xmm(d) => Some(binset(st, "+")),
+        Subsd | Subss if touches_xmm(d) => Some(binset(st, "-")),
+        Mulsd | Mulss if touches_xmm(d) => Some(binset(st, "*")),
+        Divsd | Divss if touches_xmm(d) => Some(binset(st, "/")),
+        // `xorps xmm, xmm` is how a compiler writes zero into a float register.
+        Xorps | Xorpd | Pxor
+            if d.op0_kind() == OpKind::Register
+                && d.op1_kind() == OpKind::Register
+                && d.op0_register() == d.op1_register() =>
+        {
+            Some(Stmt::Set(dest(d, st), Expr::Const(0)))
+        }
+        // The float compare, which a following `ja`/`jbe` reads exactly as the
+        // integer one reads `cmp`.
+        Comisd | Comiss | Ucomisd | Ucomiss if touches_xmm(d) => {
+            st.cmp = Some((operand(d, st, 0), operand(d, st, 1), FlagSrc::Compare));
+            None
+        }
+        // Conversions are casts, and C has a notation for those.
+        m if cast_of(m).is_some() && d.op_count() == 2 => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Un(
+                cast_of(m).expect("guarded above"),
+                Box::new(operand(d, st, 1)),
+            ),
+        )),
         Neg => Some(Stmt::Set(
             dest(d, st),
             Expr::Un("-", Box::new(operand(d, st, 0))),
@@ -995,7 +1042,7 @@ fn lift_insn(
         if let Some(Stmt::Set(dst, _)) = &stmt {
             st.cmp = Some((dst.clone(), Expr::Const(0), FlagSrc::Zero));
         }
-    } else if !matches!(m, Mnemonic::Cmp | Mnemonic::Test) && !preserves_flags(m) {
+    } else if !is_comparison(m) && !preserves_flags(m) {
         st.cmp = None;
     }
 
@@ -1033,6 +1080,48 @@ fn lift_insn(
         update_state(st, &s);
         out.push(s);
     }
+}
+
+/// The instructions that leave a comparison behind for a later branch to read.
+/// The float compares belong here with `cmp` and `test`: they are how a
+/// comparison is made, so treating them as flag clobber would throw away the
+/// comparison they had just recorded.
+fn is_comparison(m: Mnemonic) -> bool {
+    use Mnemonic::*;
+    matches!(m, Cmp | Test | Comisd | Comiss | Ucomisd | Ucomiss)
+}
+
+/// Whether any operand is a vector register, which is what separates the SSE
+/// `movsd xmm0, [rax]` from the string `movsd` that copies memory under `rep`.
+fn touches_xmm(d: &Instruction) -> bool {
+    (0..d.op_count()).any(|i| {
+        d.op_kind(i) == OpKind::Register && {
+            let r = d.op_register(i);
+            r.is_xmm() || r.is_ymm() || r.is_zmm()
+        }
+    })
+}
+
+/// The vector moves that are plain copies. The packed ones are here too: a
+/// 128-bit spill and reload is still a copy of whatever it held, and saying so
+/// claims nothing about the lanes inside it.
+fn is_sse_move(m: Mnemonic) -> bool {
+    use Mnemonic::*;
+    matches!(
+        m,
+        Movsd | Movss | Movaps | Movups | Movapd | Movupd | Movdqa | Movdqu | Movd | Movq
+    )
+}
+
+/// The C cast a conversion instruction performs, or `None` if it is not one.
+fn cast_of(m: Mnemonic) -> Option<&'static str> {
+    use Mnemonic::*;
+    Some(match m {
+        Cvtsi2sd | Cvtss2sd => "(double)",
+        Cvtsi2ss | Cvtsd2ss => "(float)",
+        Cvttsd2si | Cvttss2si | Cvtsd2si | Cvtss2si => "(int)",
+        _ => return None,
+    })
 }
 
 /// The accumulator and high-half registers a `div`/`idiv` uses, taken from the
@@ -3585,7 +3674,11 @@ fn preserves_flags(m: Mnemonic) -> bool {
         | Cdq | Cqo | Cwd
         // `not` is the one bitwise instruction that leaves the flags alone
         | Not
-    ) || format!("{m:?}").starts_with('J')
+    ) || is_sse_move(m)
+        || matches!(
+            m,
+            Addsd | Addss | Subsd | Subss | Mulsd | Mulss | Divsd | Divss | Xorps | Xorpd | Pxor
+        ) || cast_of(m).is_some() || format!("{m:?}").starts_with('J')
         // setcc/cmov read the flags but do not change them, so a compare survives
         // for a following conditional that shares it.
         || is_setcc(m)
@@ -4415,6 +4508,67 @@ mod tests {
         assert!(
             text.contains("-(ecx + edx)"),
             "a negated sum must be bracketed:
+{text}"
+        );
+    }
+
+    #[test]
+    fn scalar_floating_point_reads_as_arithmetic() {
+        // movsd xmm0, [rcx] ; mulsd xmm0, [rdx] ; addsd xmm0, xmm1 ; movsd [rdx], xmm0
+        //
+        // The result is stored, or the whole chain is dead and correctly
+        // deleted before it can be looked at.
+        let text = joined_x64(vec![
+            0xf2, 0x0f, 0x10, 0x01, // movsd xmm0, qword ptr [rcx]
+            0xf2, 0x0f, 0x59, 0x02, // mulsd xmm0, qword ptr [rdx]
+            0xf2, 0x0f, 0x58, 0xc1, // addsd xmm0, xmm1
+            0xf2, 0x0f, 0x11, 0x02, // movsd qword ptr [rdx], xmm0
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains('*') && text.contains('+'),
+            "the arithmetic should read as arithmetic:
+{text}"
+        );
+        assert!(
+            !text.contains("mulsd"),
+            "it should not stay verbatim:
+{text}"
+        );
+        assert!(
+            text.contains("xmm"),
+            "the registers say which unit this is:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_float_compare_reaches_the_branch_that_reads_it() {
+        // comisd xmm0, xmm1 ; ja +1 ; ret ; ret
+        //
+        // `comisd` is how a float comparison is made, so it has to leave the
+        // comparison behind rather than count as flag clobber.
+        let text = joined_x64(vec![
+            0x66, 0x0f, 0x2f, 0xc1, // comisd xmm0, xmm1
+            0x77, 0x01, // ja +1
+            0xc3, // ret
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("xmm0 >") || text.contains("xmm0 <"),
+            "the branch should read the compare that set it up:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_string_move_is_not_mistaken_for_an_sse_move() {
+        // rep movsd — a block copy, which shares its mnemonic with the SSE move
+        // and must not be read as an assignment.
+        let text = joined_x64(vec![0xf3, 0xa5, 0xc3]);
+        assert!(
+            text.contains("movs"),
+            "a rep-driven block copy must stay verbatim:
 {text}"
         );
     }

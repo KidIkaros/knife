@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `pseudo`: scalar floating point is decompiled. Moves, `+`/`-`/`*`/`/`, the
+  `xorps xmm, xmm` that writes zero, the `comis`/`ucomis` compares that feed a
+  branch, and the conversions as C casts. Two thirds of everything this lifter
+  still could not read on a real C runtime was SSE, and a numeric function whose
+  every step was a comment was not decompiled at all: across ucrtbase.dll,
+  unmodelled instructions fall from 8.4% to 2.7%. Only the scalar forms are
+  taken; a packed operation works on several lanes at once and `a * b` would
+  describe one of them. `xmm6`-`xmm15` join the callee-saved registers, so the
+  Win64 spills the vector moves now expose stay out of the output.
 - `pseudo`: `neg` and `not` read as `-x` and `~x` instead of becoming comments.
   Both are bracketed by C's binding, not by the tree's shape, so a negated sum
   prints `-(a + b)` — `-a + b` is a different value. `ucrtbase!_ltoa`'s
