@@ -283,7 +283,11 @@ enum Command {
     /// Open the interactive view: functions, listing, xrefs, naming and notes.
     Tui { file: String },
     /// Run a Model Context Protocol server over stdio (tools for agents).
-    Mcp,
+    Mcp {
+        /// Bind a binary up front, so tool calls need not name a path.
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Recover and list functions (control-flow analysis, x86/x64).
     Funcs {
         file: String,
@@ -564,7 +568,7 @@ fn real_main() -> Result<()> {
         ),
         Command::Db { file } => cmd_db(&file, cli.db.as_deref(), cli.json),
         Command::Tui { file } => cmd_tui(&file, cli.db.as_deref()),
-        Command::Mcp => mcp::run(),
+        Command::Mcp { file } => mcp::run(file),
         Command::Funcs { file, by_refs } => cmd_funcs(&file, by_refs, cli.json, cli.db.as_deref()),
         Command::Hex { file, off, len } => cmd_hex(&file, off, len),
         Command::Map { file, buckets } => cmd_map(&file, buckets, cli.json),

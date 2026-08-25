@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `mcp`: a target the client no longer has to keep naming. `knife mcp --file
+  PATH` binds a binary up front, the new `open` tool binds or replaces one
+  mid-session, and `file` is optional on all thirty tools. An agent repeating an
+  absolute path on every call spends its context on bookkeeping, and a path
+  retyped is a path mistyped.
 - Bulk output is buffered. `println!` flushes on every newline, which is one
   write syscall per line; `strings`, `funcs`, and `dis` now share one buffer.
   `knife strings` on a 327 MB DLL (2.3 million literals) goes from 26.1s to
