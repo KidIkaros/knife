@@ -816,6 +816,10 @@ fn lift_insn(
             Expr::Bin(op, Box::new(operand(d, st, 0)), Box::new(operand(d, st, 1))),
         )
     };
+    // A few instructions write more than one place. Their extra statements are
+    // built here from the state as it stands before the instruction runs, and
+    // emitted after the main one, so both read the values the machine read.
+    let mut extra: Vec<Stmt> = Vec::new();
     // Build the statement (reading the current register expressions), then
     // update the propagation state from it. Pushes and compares update state
     // directly and emit nothing.
@@ -842,6 +846,45 @@ fn lift_insn(
             } else {
                 Some(binset(st, "^"))
             }
+        }
+        // `div` and `idiv` divide the double-width value in `edx:eax`, not
+        // `eax` alone. `eax / src` is the whole truth only when the high half
+        // holds the extension of the low one — `xor edx, edx` ahead of an
+        // unsigned divide, `cdq` ahead of a signed one, which is what a
+        // compiler emits and what the propagated state can prove. Anything
+        // else is a real double-width division that no C expression says, and
+        // it stays unmodelled rather than becoming a confident claim about
+        // half of its own dividend.
+        m @ (Div | Idiv) => match divide_regs(d) {
+            Some((acc, high, width)) if dividend_is_extended(st, acc, high, width, m == Idiv) => {
+                let lo = reg_val(st, acc);
+                let src = operand(d, st, 0);
+                // The remainder is a value the instruction really produces, so
+                // it is stated. Nothing reads it in the common case and the
+                // dead-store pass takes it back out again.
+                extra.push(Stmt::Set(
+                    reg(high),
+                    Expr::Bin("%", Box::new(lo.clone()), Box::new(src.clone())),
+                ));
+                Some(Stmt::Set(
+                    reg(acc),
+                    Expr::Bin("/", Box::new(lo), Box::new(src)),
+                ))
+            }
+            _ => Some(asm_stmt(d)),
+        },
+        // The sign fill a signed divide runs on first. Emitted as an ordinary
+        // statement rather than hidden: when the divide that follows is one
+        // this lifter can read, nothing reads the high half and the assignment
+        // is dropped as a dead store; when it is not, the reader still sees the
+        // register being written.
+        Cdq | Cqo | Cwd => {
+            let (acc, high, width) = match d.mnemonic() {
+                Cwd => (Register::AX, Register::DX, 2),
+                Cdq => (Register::EAX, Register::EDX, 4),
+                _ => (Register::RAX, Register::RDX, 8),
+            };
+            Some(Stmt::Set(reg(high), sign_fill(&reg_val(st, acc), width)))
         }
         Inc => Some(Stmt::Set(
             dest(d, st),
@@ -973,6 +1016,56 @@ fn lift_insn(
         if !housekeeping {
             out.push(s);
         }
+    }
+    for s in extra {
+        update_state(st, &s);
+        out.push(s);
+    }
+}
+
+/// The accumulator and high-half registers a `div`/`idiv` uses, taken from the
+/// width of its divisor. The 8-bit form divides `ax` on its own and does not
+/// fit this shape, so it is left unmodelled.
+fn divide_regs(d: &Instruction) -> Option<(Register, Register, u32)> {
+    let bytes = match d.op0_kind() {
+        OpKind::Register => d.op0_register().size(),
+        OpKind::Memory => d.memory_size().size(),
+        _ => return None,
+    };
+    match bytes {
+        2 => Some((Register::AX, Register::DX, 2)),
+        4 => Some((Register::EAX, Register::EDX, 4)),
+        8 => Some((Register::RAX, Register::RDX, 8)),
+        _ => None,
+    }
+}
+
+/// What `cdq`/`cqo` — or the `sar reg, width-1` a compiler writes instead —
+/// leaves in the high half: every bit set to the accumulator's sign.
+fn sign_fill(lo: &Expr, width: u32) -> Expr {
+    Expr::Bin(
+        ">>",
+        Box::new(lo.clone()),
+        Box::new(Expr::Const(u64::from(width * 8 - 1))),
+    )
+}
+
+/// Whether the high half provably holds no more than the extension of the low
+/// one, which is what makes `acc / src` the whole division rather than a part
+/// of it. Unknown counts as no: a register we have not tracked could hold
+/// anything, and the point of asking is to refuse in exactly that case.
+fn dividend_is_extended(
+    st: &Lift,
+    acc: Register,
+    high: Register,
+    width: u32,
+    signed: bool,
+) -> bool {
+    let held = reg_val(st, high);
+    if signed {
+        held == sign_fill(&reg_val(st, acc), width)
+    } else {
+        held == Expr::Const(0)
     }
 }
 
@@ -3302,7 +3395,7 @@ fn render_expr(e: &Expr, r: Rx) -> String {
 /// enough to have its own compiler warning.
 fn precedence(op: &str) -> u8 {
     match op {
-        "*" => 10,
+        "*" | "/" | "%" => 10,
         "+" | "-" => 9,
         "<<" | ">>" => 8,
         "<" | ">" | "<=" | ">=" => 7,
@@ -3462,6 +3555,8 @@ fn preserves_flags(m: Mnemonic) -> bool {
     matches!(
         m,
         Mov | Movzx | Movsx | Movsxd | Lea | Push | Pop | Nop | Endbr32 | Endbr64
+        // the sign fills touch no flags, so a compare survives across one
+        | Cdq | Cqo | Cwd
     ) || format!("{m:?}").starts_with('J')
         // setcc/cmov read the flags but do not change them, so a compare survives
         // for a following conditional that shares it.
@@ -4131,6 +4226,125 @@ mod tests {
         assert!(
             !text.contains("rbx = 0x5"),
             "the value from before the division must not survive it: {text}"
+        );
+    }
+
+    fn joined_x64(code: Vec<u8>) -> String {
+        lines_x64_raw(code)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+    }
+
+    #[test]
+    fn an_unsigned_divide_with_a_cleared_high_half_is_division() {
+        // mov eax, ecx ; xor edx, edx ; mov r9d, 10 ; div r9d ; ret
+        //
+        // `xor edx, edx` proves the dividend is just eax, so the whole of the
+        // division is `ecx / 10` and there is nothing left over to hide.
+        let code = vec![
+            0x8b, 0xc1, // mov eax, ecx
+            0x31, 0xd2, // xor edx, edx
+            0x41, 0xb9, 0x0a, 0x00, 0x00, 0x00, // mov r9d, 10
+            0x41, 0xf7, 0xf1, // div r9d
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains(" / "),
+            "the divide should read as division:
+{text}"
+        );
+        assert!(
+            !text.contains("div "),
+            "it should not stay verbatim:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_signed_divide_reads_the_sign_fill_that_set_it_up() {
+        // mov eax, ecx ; mov r9d, 10 ; cdq ; idiv r9d ; ret
+        //
+        // `cdq` fills edx with the sign of eax, which is what makes the
+        // dividend exactly eax. The fill itself then has no reader and should
+        // not survive into the output as a stray shift.
+        let code = vec![
+            0x8b, 0xc1, // mov eax, ecx
+            0x41, 0xb9, 0x0a, 0x00, 0x00, 0x00, // mov r9d, 10
+            0x99, // cdq
+            0x41, 0xf7, 0xf9, // idiv r9d
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains(" / "),
+            "the signed divide should read as division:
+{text}"
+        );
+        assert!(
+            !text.contains("idiv"),
+            "it should not stay verbatim:
+{text}"
+        );
+        assert!(
+            !text.contains(">> 31"),
+            "the sign fill has no reader and should be dropped:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_genuine_double_width_dividend_is_left_unmodelled() {
+        // mov edx, 5 ; mov eax, 100 ; mov r9d, 7 ; div r9d ; ret
+        //
+        // edx holds a value of its own, so this divides a 64-bit quantity that
+        // no C expression over eax can state. Saying `eax / 7` here would be a
+        // confident sentence about half the dividend, which is worse than
+        // saying nothing.
+        let code = vec![
+            0xba, 0x05, 0x00, 0x00, 0x00, // mov edx, 5
+            0xb8, 0x64, 0x00, 0x00, 0x00, // mov eax, 100
+            0x41, 0xb9, 0x07, 0x00, 0x00, 0x00, // mov r9d, 7
+            0x41, 0xf7, 0xf1, // div r9d
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains("div"),
+            "it should stay verbatim:
+{text}"
+        );
+        assert!(
+            !text.contains(" / "),
+            "half a dividend must not be presented as the whole one:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_remainder_that_is_read_survives_as_a_modulo() {
+        // mov eax, ecx ; xor edx, edx ; mov r9d, 10 ; div r9d ; mov eax, edx ; ret
+        //
+        // The remainder is a real result of the instruction. It is dropped when
+        // nothing reads it; here the return value is exactly it.
+        let code = vec![
+            0x8b, 0xc1, // mov eax, ecx
+            0x31, 0xd2, // xor edx, edx
+            0x41, 0xb9, 0x0a, 0x00, 0x00, 0x00, // mov r9d, 10
+            0x41, 0xf7, 0xf1, // div r9d
+            0x8b, 0xc2, // mov eax, edx
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains(" % "),
+            "the remainder should read as a modulo:
+{text}"
         );
     }
 

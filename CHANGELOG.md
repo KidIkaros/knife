@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `pseudo`: integer division reads as division. `div` and `idiv` were
+  unmodelled, so every divide in a function became a verbatim comment and threw
+  away the values in `rax` and `rdx` with it. They now lift to `/` and `%` —
+  but only where the high half of the dividend is provably the extension of the
+  low one (`xor edx, edx`, or the `cdq` a signed divide runs first), because
+  that is the condition under which `eax / src` is the whole division rather
+  than a confident sentence about half of it. A genuine double-width dividend
+  stays unmodelled. `ucrtbase!_ltoa`'s digit loop now reads
+  `edx = r9d % edi; r9d = r9d / edi;`.
 - The refusal a session gives on an unsupported architecture named the wrong
   set: it said x86/x64 on a gate that accepts AArch64 as well, so it described
   a narrower tool than the one refusing.
