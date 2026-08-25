@@ -79,6 +79,8 @@ pub enum Expr {
     /// `Stack`, it is an address: `Mem` reads the global, `Addr` takes its address.
     Global(u64),
     Bin(&'static str, Box<Expr>, Box<Expr>),
+    /// A unary operation on one value: `-x` from `neg`, `~x` from `not`.
+    Un(&'static str, Box<Expr>),
     /// A value selected by control flow at a CFG join. Inputs are deduplicated
     /// and ordered by predecessor block, making the IR deterministic.
     ///
@@ -345,7 +347,9 @@ fn rewrite_expr_phis(expr: &mut Expr, condition: &Expr, taken_pos: usize) {
                 Box::new(values[fall_pos].clone()),
             );
         }
-        Expr::Mem(inner) | Expr::Addr(inner) => rewrite_expr_phis(inner, condition, taken_pos),
+        Expr::Mem(inner) | Expr::Addr(inner) | Expr::Un(_, inner) => {
+            rewrite_expr_phis(inner, condition, taken_pos)
+        }
         Expr::Bin(_, left, right) => {
             rewrite_expr_phis(left, condition, taken_pos);
             rewrite_expr_phis(right, condition, taken_pos);
@@ -886,6 +890,14 @@ fn lift_insn(
             };
             Some(Stmt::Set(reg(high), sign_fill(&reg_val(st, acc), width)))
         }
+        Neg => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Un("-", Box::new(operand(d, st, 0))),
+        )),
+        Not => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Un("~", Box::new(operand(d, st, 0))),
+        )),
         Inc => Some(Stmt::Set(
             dest(d, st),
             Expr::Bin("+", Box::new(operand(d, st, 0)), Box::new(Expr::Const(1))),
@@ -1128,7 +1140,7 @@ const MAX_EXPR_NODES: usize = 512;
 fn expr_nodes(e: &Expr) -> usize {
     match e {
         Expr::Bin(_, l, r) => 1 + expr_nodes(l) + expr_nodes(r),
-        Expr::Mem(i) | Expr::Addr(i) => 1 + expr_nodes(i),
+        Expr::Mem(i) | Expr::Addr(i) | Expr::Un(_, i) => 1 + expr_nodes(i),
         Expr::Ternary(c, a, b) => 1 + expr_nodes(c) + expr_nodes(a) + expr_nodes(b),
         Expr::Phi(_, v) => 1 + v.iter().map(expr_nodes).sum::<usize>(),
         Expr::Call(_, args) => 1 + args.iter().map(expr_nodes).sum::<usize>(),
@@ -1262,7 +1274,7 @@ fn internal_arity(an: &Analysis, target: u64, win64: bool) -> Option<usize> {
 fn is_pure(e: &Expr) -> bool {
     match e {
         Expr::Const(_) | Expr::Reg(..) | Expr::Stack(_) | Expr::Global(_) => true,
-        Expr::Mem(a) | Expr::Addr(a) => is_pure(a),
+        Expr::Mem(a) | Expr::Addr(a) | Expr::Un(_, a) => is_pure(a),
         Expr::Bin(_, l, r) => is_pure(l) && is_pure(r),
         Expr::Phi(_, values) => values.iter().all(is_pure),
         Expr::Ternary(c, a, b) => is_pure(c) && is_pure(a) && is_pure(b),
@@ -1274,7 +1286,7 @@ fn is_pure(e: &Expr) -> bool {
 fn reads_mem(e: &Expr) -> bool {
     match e {
         Expr::Mem(_) => true,
-        Expr::Addr(a) => reads_mem(a),
+        Expr::Addr(a) | Expr::Un(_, a) => reads_mem(a),
         Expr::Bin(_, l, r) => reads_mem(l) || reads_mem(r),
         Expr::Phi(_, values) => values.iter().any(reads_mem),
         Expr::Ternary(c, a, b) => reads_mem(c) || reads_mem(a) || reads_mem(b),
@@ -1419,7 +1431,7 @@ fn reads_regs(e: &Expr, live: &mut BTreeSet<Register>) {
         Expr::Reg(root, _) => {
             live.insert(*root);
         }
-        Expr::Mem(a) | Expr::Addr(a) => reads_regs(a, live),
+        Expr::Mem(a) | Expr::Addr(a) | Expr::Un(_, a) => reads_regs(a, live),
         Expr::Bin(_, l, r) => {
             reads_regs(l, live);
             reads_regs(r, live);
@@ -1459,7 +1471,10 @@ fn fold_stmt(s: &mut Stmt) {
 
 fn fold(e: &mut Expr) {
     match e {
-        Expr::Mem(a) | Expr::Addr(a) => fold(a),
+        // No constant folding under a unary: the result depends on the width
+        // the instruction worked at, and `neg eax` of 5 is 0xfffffffb, not the
+        // 64-bit 0xfffffffffffffffb that folding here would produce.
+        Expr::Mem(a) | Expr::Addr(a) | Expr::Un(_, a) => fold(a),
         Expr::Bin(op, l, r) => {
             fold(l);
             fold(r);
@@ -2078,7 +2093,7 @@ fn pointer_params_in(e: &Expr, facts: &mut BTreeMap<Param, CType>) {
         }
     }
     match e {
-        Expr::Mem(a) | Expr::Addr(a) => pointer_params_in(a, facts),
+        Expr::Mem(a) | Expr::Addr(a) | Expr::Un(_, a) => pointer_params_in(a, facts),
         Expr::Bin(_, a, b) => {
             pointer_params_in(a, facts);
             pointer_params_in(b, facts);
@@ -2221,7 +2236,9 @@ fn locals_in_expr(
             context,
             parameter_cache,
         ),
-        Expr::Addr(a) => locals_in_expr(a, expected, strings, locals, context, parameter_cache),
+        Expr::Addr(a) | Expr::Un(_, a) => {
+            locals_in_expr(a, expected, strings, locals, context, parameter_cache)
+        }
         Expr::Bin(_, a, b) => {
             locals_in_expr(a, expected, strings, locals, context, parameter_cache);
             locals_in_expr(b, expected, strings, locals, context, parameter_cache);
@@ -3381,6 +3398,15 @@ fn render_expr(e: &Expr, r: Rx) -> String {
             let a: Vec<String> = args.iter().map(|x| render_expr(x, r)).collect();
             format!("{name}({})", a.join(", "))
         }
+        // Unary binds tighter than every binary operator, so anything compound
+        // beneath it must be bracketed: `-(a + b)` is not `-a + b`.
+        Expr::Un(op, a) => {
+            let text = render_expr(a, r);
+            match a.as_ref() {
+                Expr::Bin(..) | Expr::Ternary(..) => format!("{op}({text})"),
+                _ => format!("{op}{text}"),
+            }
+        }
         Expr::Opaque(s) => s.clone(),
     }
 }
@@ -3543,7 +3569,7 @@ fn sets_zero_flags(m: Mnemonic) -> bool {
     use Mnemonic::*;
     matches!(
         m,
-        Add | Sub | And | Or | Xor | Inc | Dec | Shl | Shr | Sal | Sar
+        Add | Sub | And | Or | Xor | Inc | Dec | Shl | Shr | Sal | Sar | Neg
     )
 }
 
@@ -3557,6 +3583,8 @@ fn preserves_flags(m: Mnemonic) -> bool {
         Mov | Movzx | Movsx | Movsxd | Lea | Push | Pop | Nop | Endbr32 | Endbr64
         // the sign fills touch no flags, so a compare survives across one
         | Cdq | Cqo | Cwd
+        // `not` is the one bitwise instruction that leaves the flags alone
+        | Not
     ) || format!("{m:?}").starts_with('J')
         // setcc/cmov read the flags but do not change them, so a compare survives
         // for a following conditional that shares it.
@@ -4344,6 +4372,49 @@ mod tests {
         assert!(
             text.contains(" % "),
             "the remainder should read as a modulo:
+{text}"
+        );
+    }
+
+    #[test]
+    fn negation_and_complement_read_as_operators() {
+        // mov eax, ecx ; neg eax ; ret   →  -ecx
+        let text = joined_x64(vec![0x8b, 0xc1, 0xf7, 0xd8, 0xc3]);
+        assert!(
+            text.contains("-ecx"),
+            "neg should read as negation:
+{text}"
+        );
+        assert!(
+            !text.contains("neg"),
+            "it should not stay verbatim:
+{text}"
+        );
+
+        // mov eax, ecx ; not eax ; ret   →  ~ecx
+        let text = joined_x64(vec![0x8b, 0xc1, 0xf7, 0xd0, 0xc3]);
+        assert!(
+            text.contains("~ecx"),
+            "not should read as complement:
+{text}"
+        );
+        assert!(
+            !text.contains("not "),
+            "it should not stay verbatim:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_unary_over_a_sum_is_bracketed_as_c_reads_it() {
+        // mov eax, ecx ; add eax, edx ; neg eax ; ret
+        //
+        // `-ecx + edx` is C for `(-ecx) + edx`, a different value. Unary binds
+        // tighter than every binary operator, so the sum needs its brackets.
+        let text = joined_x64(vec![0x8b, 0xc1, 0x03, 0xc2, 0xf7, 0xd8, 0xc3]);
+        assert!(
+            text.contains("-(ecx + edx)"),
+            "a negated sum must be bracketed:
 {text}"
         );
     }

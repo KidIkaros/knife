@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `pseudo`: `neg` and `not` read as `-x` and `~x` instead of becoming comments.
+  Both are bracketed by C's binding, not by the tree's shape, so a negated sum
+  prints `-(a + b)` — `-a + b` is a different value. `ucrtbase!_ltoa`'s
+  negative-number branch now reads `r9d = -r9d;`.
 - `pseudo`: integer division reads as division. `div` and `idiv` were
   unmodelled, so every divide in a function became a verbatim comment and threw
   away the values in `rax` and `rdx` with it. They now lift to `/` and `%` —
