@@ -400,8 +400,8 @@ fn real_main() -> Result<()> {
             vaddr,
             off,
             func,
-        } => cmd_dis(&file, count, vaddr, off, func, cli.db.as_deref()),
-        Command::Pseudo { file, func } => cmd_pseudo(&file, &func, cli.db.as_deref()),
+        } => cmd_dis(&file, count, vaddr, off, func, cli.json, cli.db.as_deref()),
+        Command::Pseudo { file, func } => cmd_pseudo(&file, &func, cli.json, cli.db.as_deref()),
         Command::Xrefs { file, target, str } => cmd_xrefs(
             &file,
             target.as_deref(),
@@ -2284,12 +2284,16 @@ fn cmd_dis(
     vaddr: Option<String>,
     off: Option<String>,
     func: Option<String>,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     // Function mode: recover the CFG and print the whole function with labels,
     // resolved call targets, cross-references, and your notes.
     if let Some(sel) = func {
         let sess = Session::open(file, db_path, ANALYSIS_BUDGET, "disassembly")?;
+        if as_json {
+            return dis_function_json(&sess, &sel);
+        }
         return dis_function(&sess, &sel);
     }
 
@@ -2317,8 +2321,31 @@ fn cmd_dis(
     } else {
         disasm::entry_location(&bin, &bytes).context("cannot locate entry point")?
     };
-    section_header(&format!("disassembly @ 0x{va:x}"));
     let insns = disasm::disassemble(&bytes, foff, va, bin.bits, bin.arch, count);
+    if as_json {
+        let rows: Vec<serde_json::Value> = insns
+            .iter()
+            .map(|i| {
+                let text = i.text.clone();
+                let (mnemonic, operands) = match text.split_once(' ') {
+                    Some((m, r)) => (m.to_string(), r.trim_start().to_string()),
+                    None => (text.clone(), String::new()),
+                };
+                json!({
+                    "addr": i.addr,
+                    "bytes": i.bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    "mnemonic": mnemonic,
+                    "operands": operands,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "start": va, "insns": rows }))?
+        );
+        return Ok(());
+    }
+    section_header(&format!("disassembly @ 0x{va:x}"));
     print_disasm(&insns)
 }
 
@@ -2763,6 +2790,45 @@ fn cmd_funcs(file: &str, by_refs: bool, as_json: bool, db_path: Option<&str>) ->
     output::finish(out)
 }
 
+/// The same listing `dis_function` prints, as data.
+///
+/// It emits `listing::Line`, which is the model the window and the agents
+/// already read, so the three cannot drift into describing the same function
+/// differently.
+fn dis_function_json(sess: &Session, sel: &str) -> Result<()> {
+    let an = &sess.an;
+    let func = resolve_function(an, sel)
+        .with_context(|| format!("no function '{sel}' (try `knife funcs`)"))?;
+    let base = engine::display_base(&sess.bin);
+    let strings = listing::string_map(&sess.bin, &sess.bytes, base);
+    let hints = driver::plausibly_a_driver(&sess.bin)
+        .then(|| driver::listing_hints(&sess.bin, &sess.bytes, an));
+    let lines = listing::function(an, func, &sess.db, base, &strings, hints.as_ref());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "function": func.name,
+            "addr": func.addr + an.display_base,
+            "blocks": func.blocks.len(),
+            "size": func.size,
+            "incoming": func.incoming,
+            "lines": lines,
+        }))?
+    );
+    Ok(())
+}
+
+/// Resolve a selector the way the listing commands do: a name, or an address
+/// with or without the image base.
+fn resolve_function<'a>(an: &'a engine::Analysis, sel: &str) -> Option<&'a engine::Function> {
+    if let Some(f) = an.find_by_name(sel) {
+        return Some(f);
+    }
+    let v = parse_num(sel).ok()?;
+    let internal = v.checked_sub(an.display_base).unwrap_or(v);
+    an.find_function(internal).or_else(|| an.find_function(v))
+}
+
 fn dis_function(sess: &Session, sel: &str) -> Result<()> {
     let an = &sess.an;
 
@@ -2859,7 +2925,7 @@ fn dis_function(sess: &Session, sel: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pseudo(file: &str, sel: &str, db_path: Option<&str>) -> Result<()> {
+fn cmd_pseudo(file: &str, sel: &str, as_json: bool, db_path: Option<&str>) -> Result<()> {
     let sess = Session::open(file, db_path, ANALYSIS_BUDGET, "the pseudocode view")?;
     if !disasm::lifting_supported(sess.bin.arch) {
         anyhow::bail!(
@@ -2879,12 +2945,24 @@ fn cmd_pseudo(file: &str, sel: &str, db_path: Option<&str>) -> Result<()> {
     };
     let func = func.with_context(|| format!("no function '{sel}' (try `knife funcs`)"))?;
 
+    let strings = listing::string_map(&sess.bin, &sess.bytes, engine::display_base(&sess.bin));
+    if as_json {
+        let lines = analysis::ir::decompile(an, &sess.bin, func, &strings, &sess.db);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "function": func.name,
+                "addr": func.addr + an.display_base,
+                "lines": lines,
+            }))?
+        );
+        return Ok(());
+    }
     section_header(&format!(
         "pseudocode: {} @ 0x{:x}",
         func.name,
         func.addr + an.display_base
     ));
-    let strings = listing::string_map(&sess.bin, &sess.bytes, engine::display_base(&sess.bin));
     for line in analysis::ir::decompile(an, &sess.bin, func, &strings, &sess.db) {
         // Labels and the function braces sit at the margin; statements indent.
         if line.label {

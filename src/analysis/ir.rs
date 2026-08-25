@@ -133,7 +133,7 @@ struct IrBlock {
 }
 
 /// One rendered output line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Line {
     pub label: bool,
     pub text: String,

@@ -13,7 +13,8 @@ use crate::model::Binary;
 use std::collections::BTreeMap;
 
 /// The trailing comment on an instruction, and where it came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "text", rename_all = "lowercase")]
 pub enum Annot {
     /// Something you wrote. Outranks anything derived.
     Note(String),
@@ -28,7 +29,8 @@ pub enum Annot {
     Hint(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Line {
     /// A branch target inside the function, printed as its own line.
     Label { addr: u64, text: String },
