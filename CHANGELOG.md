@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `--json` now means JSON everywhere it is accepted, and is refused where it is
+  not. `name`, `note`, `field`, `type`, `var`, `proto` and `typelib` confirm
+  their edit as JSON instead of printing prose and exiting zero, which is how an
+  applied edit and a quietly ignored one came to look identical to a script.
+  `diff` emits the differences it already computed rather than communicating
+  only through its exit status. `tui`, `mcp` and `completions` have no JSON form
+  and now say so and exit non-zero — `knife --json tui FILE` used to open an
+  interactive UI and hang whatever was waiting on it.
 - Signature scanning is about five times faster, and full triage more than
   three. The byte search compared the whole needle at every offset, and these
   needles are long — the AES S-box is 256 bytes — so it ran a length-checked

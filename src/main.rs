@@ -387,6 +387,15 @@ fn real_main() -> Result<()> {
     let cli = Cli::parse_from(args);
     // Set before any parse: the PE builder reads it while constructing `Binary`.
     formats::pdbsym::set_override(cli.pdb.clone());
+
+    // `--json` is global, so it reaches commands that have nothing to say in
+    // JSON. Refusing is the point: a script that asked for JSON and received a
+    // shell completion script — or that hung because it had opened an
+    // interactive UI — learned nothing at all from a zero exit.
+    if let Some(name) = cli.json.then(|| without_json_form(&cli.cmd)).flatten() {
+        anyhow::bail!("`{name}` has no JSON form; run it without --json");
+    }
+
     match cli.cmd {
         Command::Info { file, rules } => cmd_info(&file, rules.as_deref(), cli.json),
         Command::Sections { file } => cmd_sections(&file, cli.json),
@@ -458,6 +467,7 @@ fn real_main() -> Result<()> {
             name.as_deref(),
             None,
             clear,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Note {
@@ -471,6 +481,7 @@ fn real_main() -> Result<()> {
             None,
             text.as_deref(),
             clear,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Field {
@@ -482,11 +493,14 @@ fn real_main() -> Result<()> {
             clear,
         } => cmd_field(
             &file,
-            &type_name,
-            &offset,
-            name.as_deref(),
-            data_type.as_deref(),
-            clear,
+            FieldArgs {
+                type_name: &type_name,
+                offset: &offset,
+                name: name.as_deref(),
+                data_type: data_type.as_deref(),
+                clear,
+            },
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Type {
@@ -501,6 +515,7 @@ fn real_main() -> Result<()> {
             &base,
             type_name.as_deref(),
             clear,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Var {
@@ -515,6 +530,7 @@ fn real_main() -> Result<()> {
             &base,
             name.as_deref(),
             clear,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Patch {
@@ -552,6 +568,7 @@ fn real_main() -> Result<()> {
             returns.as_deref(),
             &params,
             clear,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::TypeLib {
@@ -564,6 +581,7 @@ fn real_main() -> Result<()> {
             export.as_deref(),
             import.as_deref(),
             replace,
+            cli.json,
             cli.db.as_deref(),
         ),
         Command::Db { file } => cmd_db(&file, cli.db.as_deref(), cli.json),
@@ -584,7 +602,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::Diff { a, b } => {
-            let changed = cmd_diff(&a, &b)?;
+            let changed = cmd_diff(&a, &b, cli.json)?;
             // A diff is the kind of command scripts inspect with the exit
             // status: 0 = no change, 1 = something changed.
             if changed {
@@ -619,12 +637,40 @@ fn to_stored(bin: &Binary, va: u64) -> u64 {
     va.wrapping_sub(engine::display_base(bin))
 }
 
+/// Confirm an edit to the database. A caller that asked for JSON gets JSON,
+/// carrying the same facts as the human line.
+///
+/// Printing prose and exiting zero is how an edit that was applied and one that
+/// was quietly not applied come to look identical to a script — the same trap
+/// `dis` and `pseudo` had, in the commands where being sure matters most,
+/// because these are the ones that write something down.
+/// The commands that have nothing to say in JSON, named so the refusal can say
+/// which one it is.
+fn without_json_form(cmd: &Command) -> Option<&'static str> {
+    match cmd {
+        Command::Tui { .. } => Some("tui"),
+        Command::Mcp { .. } => Some("mcp"),
+        Command::Completions { .. } => Some("completions"),
+        _ => None,
+    }
+}
+
+fn confirm(as_json: bool, value: serde_json::Value, human: impl FnOnce()) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        human();
+    }
+    Ok(())
+}
+
 fn cmd_annotate(
     file: &str,
     addr: &str,
     name: Option<&str>,
     note: Option<&str>,
     clear: bool,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     let bytes = load(file)?;
@@ -639,22 +685,36 @@ fn cmd_annotate(
             anyhow::bail!("nothing stored at 0x{va:x}");
         }
         store.save()?;
-        println!("  {} 0x{va:x}", "cleared".style(faint()));
+        confirm(
+            as_json,
+            json!({ "action": "cleared", "address": format!("0x{va:x}") }),
+            || println!("  {} 0x{va:x}", "cleared".style(faint())),
+        )?;
         return Ok(());
     }
 
     match (name, note) {
         (Some(n), _) => {
             store.set_name(at, n);
-            println!("  {} 0x{va:x}  {}", "named".style(faint()), n.style(mint()));
+            confirm(
+                as_json,
+                json!({ "action": "named", "address": format!("0x{va:x}"), "value": n }),
+                || println!("  {} 0x{va:x}  {}", "named".style(faint()), n.style(mint())),
+            )?;
         }
         (_, Some(t)) => {
             store.set_note(at, t);
-            println!(
-                "  {} 0x{va:x}  {}",
-                "noted".style(faint()),
-                t.style(muted())
-            );
+            confirm(
+                as_json,
+                json!({ "action": "noted", "address": format!("0x{va:x}"), "value": t }),
+                || {
+                    println!(
+                        "  {} 0x{va:x}  {}",
+                        "noted".style(faint()),
+                        t.style(muted())
+                    )
+                },
+            )?;
         }
         (None, None) => anyhow::bail!("give a value, or --clear to remove what is there"),
     }
@@ -662,15 +722,14 @@ fn cmd_annotate(
     Ok(())
 }
 
-fn cmd_field(
-    file: &str,
-    type_name: &str,
-    offset: &str,
-    name: Option<&str>,
-    data_type: Option<&str>,
-    clear: bool,
-    db_path: Option<&str>,
-) -> Result<()> {
+fn cmd_field(file: &str, args: FieldArgs<'_>, as_json: bool, db_path: Option<&str>) -> Result<()> {
+    let FieldArgs {
+        type_name,
+        offset,
+        name,
+        data_type,
+        clear,
+    } = args;
     let bytes = load(file)?;
     let mut store = open_db(file, &bytes, db_path)?;
     let offset = parse_signed_num(offset)
@@ -683,29 +742,42 @@ fn cmd_field(
             anyhow::bail!("no field stored for {type_name} at {offset:+#x}")
         };
         store.save()?;
-        println!(
-            "  {} {}{:+#x}  {}",
-            "cleared".style(faint()),
-            type_name.style(mint()),
-            offset,
-            old.style(muted())
-        );
+        confirm(
+            as_json,
+            json!({ "action": "cleared", "type": type_name, "offset": offset, "was": old.to_string() }),
+            || {
+                println!(
+                    "  {} {}{:+#x}  {}",
+                    "cleared".style(faint()),
+                    type_name.style(mint()),
+                    offset,
+                    old.style(muted())
+                )
+            },
+        )?;
         return Ok(());
     }
     let name = name.context("give a field name, or use --clear")?;
     store.set_typed_field(type_name, offset, name, data_type)?;
     store.save()?;
-    println!(
-        "  {} {}{:+#x}  {}",
-        "field".style(faint()),
-        type_name.style(mint()),
-        offset,
-        match data_type {
-            Some(ty) => format!("{name}: {ty}"),
-            None => name.to_string(),
-        }
-        .style(mint())
-    );
+    confirm(
+        as_json,
+        json!({ "action": "field", "type": type_name, "offset": offset,
+                "name": name, "data_type": data_type }),
+        || {
+            println!(
+                "  {} {}{:+#x}  {}",
+                "field".style(faint()),
+                type_name.style(mint()),
+                offset,
+                match data_type {
+                    Some(ty) => format!("{name}: {ty}"),
+                    None => name.to_string(),
+                }
+                .style(mint())
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -715,6 +787,7 @@ fn cmd_type_binding(
     requested_base: &str,
     type_name: Option<&str>,
     clear: bool,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     let mut sess = Session::open(file, db_path, ANALYSIS_BUDGET, "type binding")?;
@@ -752,25 +825,37 @@ fn cmd_type_binding(
             anyhow::bail!("no type bound to {function_name}:{requested_base}")
         };
         sess.db.save()?;
-        println!(
-            "  {} {}:{}  {}",
-            "cleared".style(faint()),
-            function_name.style(mint()),
-            base.style(muted()),
-            old.style(muted())
-        );
+        confirm(
+            as_json,
+            json!({ "action": "cleared", "function": &function_name, "base": &base, "was": &old }),
+            || {
+                println!(
+                    "  {} {}:{}  {}",
+                    "cleared".style(faint()),
+                    function_name.style(mint()),
+                    base.style(muted()),
+                    old.style(muted())
+                )
+            },
+        )?;
         return Ok(());
     }
     let type_name = type_name.context("give a type name, or use --clear")?;
     sess.db.bind_type(stored, &base, type_name)?;
     sess.db.save()?;
-    println!(
-        "  {} {}:{}  {}",
-        "bound".style(faint()),
-        function_name.style(mint()),
-        base.style(muted()),
-        type_name.style(mint())
-    );
+    confirm(
+        as_json,
+        json!({ "action": "bound", "function": &function_name, "base": &base, "type": type_name }),
+        || {
+            println!(
+                "  {} {}:{}  {}",
+                "bound".style(faint()),
+                function_name.style(mint()),
+                base.style(muted()),
+                type_name.style(mint())
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -780,6 +865,7 @@ fn cmd_variable(
     requested_base: &str,
     name: Option<&str>,
     clear: bool,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     let mut sess = Session::open(file, db_path, ANALYSIS_BUDGET, "variable renaming")?;
@@ -817,29 +903,53 @@ fn cmd_variable(
             anyhow::bail!("no alias stored for {function_name}:{requested_base}")
         };
         sess.db.save()?;
-        println!(
-            "  {} {}:{}  {}",
-            "cleared".style(faint()),
-            function_name.style(mint()),
-            recovered.style(muted()),
-            old.style(muted())
-        );
+        confirm(
+            as_json,
+            json!({ "action": "cleared", "function": &function_name,
+                    "variable": &recovered, "was": &old }),
+            || {
+                println!(
+                    "  {} {}:{}  {}",
+                    "cleared".style(faint()),
+                    function_name.style(mint()),
+                    recovered.style(muted()),
+                    old.style(muted())
+                )
+            },
+        )?;
         return Ok(());
     }
     let name = name.context("give a variable name, or use --clear")?;
     sess.db.set_variable(stored, &recovered, name)?;
     sess.db.save()?;
-    println!(
-        "  {} {}:{}  {}",
-        "variable".style(faint()),
-        function_name.style(mint()),
-        recovered.style(muted()),
-        name.style(mint())
-    );
+    confirm(
+        as_json,
+        json!({ "action": "variable", "function": &function_name,
+                "variable": &recovered, "name": name }),
+        || {
+            println!(
+                "  {} {}:{}  {}",
+                "variable".style(faint()),
+                function_name.style(mint()),
+                recovered.style(muted()),
+                name.style(mint())
+            )
+        },
+    )?;
     Ok(())
 }
 
 #[derive(Clone, Copy)]
+/// What `knife field` was asked to do, grouped so the handler takes a request
+/// rather than a list of positional strings — the same shape `patch` uses.
+struct FieldArgs<'a> {
+    type_name: &'a str,
+    offset: &'a str,
+    name: Option<&'a str>,
+    data_type: Option<&'a str>,
+    clear: bool,
+}
+
 struct PatchArgs<'a> {
     vaddr: Option<&'a str>,
     off: Option<&'a str>,
@@ -1085,6 +1195,7 @@ fn cmd_prototype(
     returns: Option<&str>,
     params: &[String],
     clear: bool,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     let mut sess = Session::open(file, db_path, ANALYSIS_BUDGET, "prototype editing")?;
@@ -1110,26 +1221,40 @@ fn cmd_prototype(
             anyhow::bail!("no prototype stored for {function_name}")
         };
         sess.db.save()?;
-        println!(
-            "  {} {}  {} ({})",
-            "cleared".style(faint()),
-            function_name.style(mint()),
-            old.returns.style(muted()),
-            old.params.join(", ").style(muted())
-        );
+        confirm(
+            as_json,
+            json!({ "action": "cleared", "function": &function_name,
+                    "returns": &old.returns, "params": &old.params }),
+            || {
+                println!(
+                    "  {} {}  {} ({})",
+                    "cleared".style(faint()),
+                    function_name.style(mint()),
+                    old.returns.style(muted()),
+                    old.params.join(", ").style(muted())
+                )
+            },
+        )?;
         return Ok(());
     }
 
     let returns = returns.context("give --returns TYPE, or use --clear")?;
     sess.db.set_prototype(stored, returns, params)?;
     sess.db.save()?;
-    println!(
-        "  {} {}  {} ({})",
-        "prototype".style(faint()),
-        function_name.style(mint()),
-        returns.style(mint()),
-        params.join(", ").style(muted())
-    );
+    confirm(
+        as_json,
+        json!({ "action": "prototype", "function": &function_name,
+                "returns": returns, "params": params }),
+        || {
+            println!(
+                "  {} {}  {} ({})",
+                "prototype".style(faint()),
+                function_name.style(mint()),
+                returns.style(mint()),
+                params.join(", ").style(muted())
+            )
+        },
+    )?;
     Ok(())
 }
 
@@ -1138,6 +1263,7 @@ fn cmd_type_library(
     export: Option<&str>,
     import: Option<&str>,
     replace: bool,
+    as_json: bool,
     db_path: Option<&str>,
 ) -> Result<()> {
     match (export, import) {
@@ -1150,35 +1276,49 @@ fn cmd_type_library(
     let mut store = open_db(file, &bytes, db_path)?;
     if let Some(path) = export {
         let summary = store.export_type_library(std::path::Path::new(path))?;
-        println!(
-            "  {} {} type{} · {} field{}  {}",
-            "exported".style(faint()),
-            summary.types,
-            plural(summary.types),
-            summary.fields,
-            plural(summary.fields),
-            path.style(mint())
-        );
+        confirm(
+            as_json,
+            json!({ "action": "exported", "types": summary.types,
+                    "fields": summary.fields, "path": path }),
+            || {
+                println!(
+                    "  {} {} type{} · {} field{}  {}",
+                    "exported".style(faint()),
+                    summary.types,
+                    plural(summary.types),
+                    summary.fields,
+                    plural(summary.fields),
+                    path.style(mint())
+                )
+            },
+        )?;
         return Ok(());
     }
 
     let path = import.expect("validated above");
     let summary = store.import_type_library(std::path::Path::new(path), replace)?;
     store.save()?;
-    println!(
-        "  {} {} type{} · {} field{}{}  {}",
-        "imported".style(faint()),
-        summary.types,
-        plural(summary.types),
-        summary.fields,
-        plural(summary.fields),
-        if replace {
-            " · replaced conflicts"
-        } else {
-            ""
+    confirm(
+        as_json,
+        json!({ "action": "imported", "types": summary.types, "fields": summary.fields,
+                "replaced_conflicts": replace, "path": path }),
+        || {
+            println!(
+                "  {} {} type{} · {} field{}{}  {}",
+                "imported".style(faint()),
+                summary.types,
+                plural(summary.types),
+                summary.fields,
+                plural(summary.fields),
+                if replace {
+                    " · replaced conflicts"
+                } else {
+                    ""
+                },
+                path.style(mint())
+            )
         },
-        path.style(mint())
-    );
+    )?;
     Ok(())
 }
 
@@ -3191,7 +3331,7 @@ fn cmd_ls(file: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_diff(a: &str, b: &str) -> Result<bool> {
+fn cmd_diff(a: &str, b: &str, as_json: bool) -> Result<bool> {
     let bytes_a = load(a)?;
     let bin_a = parse(a, &bytes_a)?;
     let bytes_b = load(b)?;
@@ -3199,13 +3339,50 @@ fn cmd_diff(a: &str, b: &str) -> Result<bool> {
     let (lines, changed) = diff_binaries(&bin_a, &bytes_a, &bin_b, &bytes_b);
 
     if changed.is_empty() {
-        println!(
-            "  {}  {} and {} are identical",
-            "no change".style(mint()),
-            basename(a),
-            basename(b)
-        );
+        confirm(
+            as_json,
+            json!({ "changed": false, "a": basename(a), "b": basename(b),
+                    "categories": [], "differences": [] }),
+            || {
+                println!(
+                    "  {}  {} and {} are identical",
+                    "no change".style(mint()),
+                    basename(a),
+                    basename(b)
+                )
+            },
+        )?;
         return Ok(false);
+    }
+
+    // The diff it already computed, said once rather than only coloured in. A
+    // caller could previously learn only whether something changed, from the
+    // exit status, and had to read prose to find out what.
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "changed": true,
+                "a": basename(a),
+                "b": basename(b),
+                "categories": &changed,
+                "differences": lines
+                    .iter()
+                    .map(|l| match l.split_once(' ') {
+                        Some((mark @ ("+" | "-" | "~"), rest)) => json!({
+                            "change": match mark {
+                                "+" => "added",
+                                "-" => "removed",
+                                _ => "modified",
+                            },
+                            "text": rest,
+                        }),
+                        _ => json!({ "change": "note", "text": l }),
+                    })
+                    .collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(true);
     }
 
     println!(
@@ -3454,6 +3631,37 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::formats::fixture;
+
+    #[test]
+    fn commands_without_a_json_form_are_named_and_the_rest_are_not() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().cmd;
+        // `--json` is global, so it reaches these; they have no JSON to give
+        // and must say so rather than print something else and exit zero.
+        assert_eq!(
+            without_json_form(&parse(&["knife", "tui", "a.exe"])),
+            Some("tui")
+        );
+        assert_eq!(without_json_form(&parse(&["knife", "mcp"])), Some("mcp"));
+        assert_eq!(
+            without_json_form(&parse(&["knife", "completions", "bash"])),
+            Some("completions")
+        );
+        // Everything else answers in JSON, including the commands that write.
+        for args in [
+            vec!["knife", "info", "a.exe"],
+            vec!["knife", "audit", "a.exe"],
+            vec!["knife", "diff", "a.exe", "b.exe"],
+            vec!["knife", "name", "a.exe", "0x1000", "f"],
+            vec!["knife", "note", "a.exe", "0x1000", "t"],
+            vec!["knife", "proto", "a.exe", "--func", "f", "--returns", "int"],
+        ] {
+            assert_eq!(
+                without_json_form(&parse(&args)),
+                None,
+                "{args:?} should answer --json"
+            );
+        }
+    }
 
     /// A raw x86-64 code blob mapped at `vaddr`, exec, nothing else. The
     /// minimal shape both sides of a diff can share.
