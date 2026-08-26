@@ -61,6 +61,7 @@ fn main() {
             agent::agent_ask,
             agent::agent_cancel,
             agent::agent_quota,
+            agent::agent_models,
             agent::agent_autopilot,
             presence::presence_update,
             commands::cfg,

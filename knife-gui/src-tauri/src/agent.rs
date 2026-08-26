@@ -588,6 +588,84 @@ pub async fn agent_quota() -> Result<Quota, String> {
     Ok(quota)
 }
 
+/// One model as the picker needs to know it.
+#[derive(serde::Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    /// Both prompt and completion priced at zero.
+    pub free: bool,
+    pub context: u64,
+}
+
+/// The models worth offering, live from the provider.
+///
+/// Hardcoding a list is how the picker went stale — a stealth model graduated,
+/// its id 404'd, and the entry pointing at it was dead until edited by hand.
+/// This reads the real catalogue instead, so free-vs-paid comes from actual
+/// pricing and a renamed or retired model simply is or is not in the list.
+///
+/// Filtered to models that support tool calls: this agent drives knife entirely
+/// through tools, so a model that cannot call them cannot do the job, and
+/// listing it is only a way to pick something that fails. The listing endpoint
+/// needs no key, so the catalogue loads before one is set.
+#[tauri::command]
+pub async fn agent_models() -> Result<Vec<ModelInfo>, String> {
+    let resp = http()
+        .get("https://openrouter.ai/api/v1/models")
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the provider: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("the model list is unavailable ({})", resp.status()));
+    }
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let data = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("the model list came back in a shape knife did not expect")?;
+
+    let mut out: Vec<ModelInfo> = data
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str)?.to_string();
+            let supports_tools = m
+                .get("supported_parameters")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("tools")));
+            if !supports_tools {
+                return None;
+            }
+            let name = m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            // Pricing is a string per token; "0" (or "0.0") means free.
+            let zero = |k: &str| {
+                m.get("pricing")
+                    .and_then(|p| p.get(k))
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .is_some_and(|v| v == 0.0)
+            };
+            let context = m.get("context_length").and_then(Value::as_u64).unwrap_or(0);
+            Some(ModelInfo {
+                id,
+                name,
+                free: zero("prompt") && zero("completion"),
+                context,
+            })
+        })
+        .collect();
+
+    // Long context first: a decompiled function and its callers add up quickly,
+    // and the models that hold that are the ones this work wants. Ties by name,
+    // so the order is stable between fetches.
+    out.sort_by(|a, b| b.context.cmp(&a.context).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
+}
+
 /// Look up the allowance once a session, before the first request goes out.
 ///
 /// Best effort on purpose: if the lookup fails the turn proceeds unpaced and

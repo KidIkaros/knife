@@ -287,9 +287,13 @@ export default function App() {
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentEnabled, setAgentEnabled] = useState(() => loadNum("knife.agent", 0) === 1);
   const [agentKey, setAgentKey] = useState(false);
-  const [agentModel, setAgentModel] = useState(
-    () => localStorage.getItem("knife.agent.model") ?? "stealth/ox-alpha",
-  );
+  const [agentModel, setAgentModel] = useState(() => {
+    const stored = localStorage.getItem("knife.agent.model");
+    // The stealth alias graduated to a real id and now 404s; move anyone still
+    // pointed at it onto the model it became.
+    if (!stored || stored === "stealth/ox-alpha") return "z-ai/glm-5.3-flash";
+    return stored;
+  });
   const [consented, setConsented] = useState<Set<string>>(new Set());
   // Where the last session left off, restored once the window is up.
   const [restored, setRestored] = useState(false);

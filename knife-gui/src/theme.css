@@ -2620,6 +2620,31 @@ button.act:disabled {
   border-color: var(--faint);
 }
 
+.agent-model optgroup {
+  background: var(--panel);
+  color: var(--faint);
+  font-style: normal;
+}
+
+/* Narrow the (long, live) model list before opening the select. */
+.agent-model-filter {
+  width: 96px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  outline: none;
+}
+.agent-model-filter::placeholder {
+  color: var(--faint);
+}
+.agent-model-filter:focus {
+  border-color: var(--faint);
+}
+
 /* The provider's own statement of what this key may do. */
 .agent-quota {
   padding: 1px 7px;

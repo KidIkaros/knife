@@ -352,6 +352,13 @@ export interface AgentQuota {
   interval: string | null;
 }
 
+export interface ModelInfo {
+  id: string;
+  name: string;
+  free: boolean;
+  context: number;
+}
+
 export interface AgentTurn {
   reply: string;
   steps: AgentStep[];
@@ -428,6 +435,7 @@ export const api = {
   /// What the provider says this key is allowed. Used to pace requests and to
   /// show the analyst the real allowance rather than a guess.
   agentQuota: () => invoke<AgentQuota>("agent_quota"),
+  agentModels: () => invoke<ModelInfo[]>("agent_models"),
   presenceUpdate: (details: string, state: string, tooltip: string) =>
     invoke<void>("presence_update", { details, state, tooltip }),
   agentAutopilot: (model: string) => invoke<AgentTurn>("agent_autopilot", { model }),

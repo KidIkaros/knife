@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   api,
@@ -6,6 +6,7 @@ import {
   type Applied,
   type AgentStep,
   type ChatMessage,
+  type ModelInfo,
   type Suggestion,
 } from "../api";
 import { Markdown } from "./Markdown";
@@ -67,26 +68,60 @@ type AgentEvent =
   | { kind: "paced"; seconds: number }
   | { kind: "done" };
 
-/// The models offered in the picker.
+/// The picker is filled live from the provider's own catalogue (see
+/// `api.agentModels`), so free-vs-paid is real pricing and a retired model
+/// simply is not in the list — the hardcoded list this replaced went stale the
+/// moment a stealth model graduated and its id started returning 404.
 ///
-/// A short list, not a catalogue: OpenRouter carries hundreds and almost none of
-/// them are worth pointing at a disassembler. What this work needs is a long
-/// context — a decompiled function and its callers add up quickly — and tool
-/// calling that holds together over a dozen rounds. The stealth entries are free
-/// and rate limited hard, which is the trade being made when one is chosen.
-/// Anything not listed can still be typed in.
-const MODELS: Array<{ id: string; label: string; note: string }> = [
-  { id: "stealth/ox-alpha", label: "ox-alpha", note: "stealth · free · rate limited" },
-  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", note: "strong tool use" },
-  { id: "anthropic/claude-3.5-haiku", label: "Claude 3.5 Haiku", note: "fast, cheap" },
-  { id: "openai/gpt-4o", label: "GPT-4o", note: "general purpose" },
-  { id: "openai/gpt-4o-mini", label: "GPT-4o mini", note: "fast, cheap" },
-  { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash", note: "long context" },
-  { id: "deepseek/deepseek-chat", label: "DeepSeek", note: "cheap, capable" },
-  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", note: "open weights" },
+/// This handful is only the fallback for when that fetch cannot run — offline,
+/// or the endpoint is down — so the picker is never empty and the agent stays
+/// usable. Anything not listed can still be typed in via "other…".
+const FALLBACK_MODELS: ModelInfo[] = [
+  { id: "z-ai/glm-5.3-flash", name: "Z.ai: GLM 5.3 Flash", free: false, context: 1310720 },
+  { id: "z-ai/glm-4.5-air:free", name: "Z.ai: GLM 4.5 Air (free)", free: true, context: 131072 },
+  { id: "deepseek/deepseek-chat-v3.1:free", name: "DeepSeek V3.1 (free)", free: true, context: 163840 },
+  { id: "anthropic/claude-sonnet-4.5", name: "Anthropic: Claude Sonnet 4.5", free: false, context: 200000 },
+  { id: "google/gemini-2.5-flash", name: "Google: Gemini 2.5 Flash", free: false, context: 1048576 },
 ];
 
+/// The catalogue is fetched once per app run and shared across every mount of
+/// the pane — reopening it should not hit the network again.
+let modelCache: ModelInfo[] | null = null;
+let modelFetch: Promise<ModelInfo[]> | null = null;
+function loadModels(): Promise<ModelInfo[]> {
+  if (modelCache) return Promise.resolve(modelCache);
+  if (!modelFetch) {
+    modelFetch = api
+      .agentModels()
+      .then((list) => {
+        modelCache = list.length ? list : FALLBACK_MODELS;
+        return modelCache;
+      })
+      .catch(() => {
+        modelFetch = null; // a failure is not cached; a later open may succeed
+        return FALLBACK_MODELS;
+      });
+  }
+  return modelFetch;
+}
+
 const CUSTOM = "__custom__";
+
+/// A context window as a short token count: 1310720 → "1.3M", 131072 → "128k".
+function ctxLabel(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return `${n}`;
+}
+
+function ModelOption({ m }: { m: ModelInfo }) {
+  return (
+    <option value={m.id} title={`${m.id} · ${ctxLabel(m.context)} context`}>
+      {m.name}
+      {m.context ? ` · ${ctxLabel(m.context)}` : ""}
+    </option>
+  );
+}
 
 const chatKey = (target: string) => `knife.agent.chat.${target}`;
 
@@ -155,7 +190,27 @@ export function AgentPane({
   // What the provider says this key may do. Shown rather than guessed at: a
   // limit you can see is a limit you can plan around.
   const [quota, setQuota] = useState<AgentQuota | null>(null);
-  const known = MODELS.some((m) => m.id === model);
+  const [models, setModels] = useState<ModelInfo[]>(modelCache ?? FALLBACK_MODELS);
+  const [modelFilter, setModelFilter] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void loadModels().then((list) => {
+      if (alive) setModels(list);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const known = models.some((m) => m.id === model);
+  const grouped = useMemo(() => {
+    const q = modelFilter.trim().toLowerCase();
+    const hit = (m: ModelInfo) =>
+      !q || m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q);
+    return {
+      free: models.filter((m) => m.free && hit(m)),
+      paid: models.filter((m) => !m.free && hit(m)),
+    };
+  }, [models, modelFilter]);
   const endRef = useRef<HTMLDivElement>(null);
   const liveRef = useRef(false);
 
@@ -609,7 +664,18 @@ export function AgentPane({
               </span>
             )}
             {/* A list, not a text box. The id had to be typed from memory, and
-                a typo reads back as a failed request rather than a wrong name. */}
+                a typo reads back as a failed request rather than a wrong name.
+                The list is live from the provider (see loadModels), grouped by
+                what actually costs money, with a filter because it is long. */}
+            {models.length > 14 && (
+              <input
+                className="agent-model-filter"
+                value={modelFilter}
+                placeholder="filter models"
+                title="Narrow the model list"
+                onChange={(e) => setModelFilter(e.target.value)}
+              />
+            )}
             <select
               className="agent-model"
               value={known ? model : CUSTOM}
@@ -622,11 +688,20 @@ export function AgentPane({
                 }
               }}
             >
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id} title={`${m.id} — ${m.note}`}>
-                  {m.label}
-                </option>
-              ))}
+              {grouped.free.length > 0 && (
+                <optgroup label="Free">
+                  {grouped.free.map((m) => (
+                    <ModelOption key={m.id} m={m} />
+                  ))}
+                </optgroup>
+              )}
+              {grouped.paid.length > 0 && (
+                <optgroup label="Paid">
+                  {grouped.paid.map((m) => (
+                    <ModelOption key={m.id} m={m} />
+                  ))}
+                </optgroup>
+              )}
               {!known && (
                 <option value={model} title={model}>
                   {model}
