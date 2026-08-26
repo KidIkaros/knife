@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `pseudo` no longer hangs. Recovering a function's signature walked the call
+  graph to a depth of eight, marking each function as visited and unmarking it
+  on the way out, so a function reachable down several call paths was walked
+  once per path. The backward walk for the return type did the same thing over
+  basic blocks, cloning its visited set at every predecessor. Both are
+  exponential, and on ucrtbase.dll two functions never finished at all —
+  `sub_18000df50` now takes 3.7s and `sub_180005490` 1.0s. Answers are worked
+  out once per function per remaining depth, which is what they depend on.
+  Output is unchanged: five functions that did complete before decompile
+  byte-for-byte identically, about 18% faster.
 - `pseudo`: an x64 switch reads as a switch, and a case label no longer states a
   value nobody checked. The jump through a register is lifted as a dispatch on
   the register the table was indexed by, not the one jumped through, which by

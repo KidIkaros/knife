@@ -1856,19 +1856,83 @@ fn prototype(name: &str) -> Option<(CType, &'static [CType])> {
 fn internal_return_type(an: &Analysis, bin: &Binary, name: &str) -> Option<CType> {
     let function = an.find_by_name(name)?;
     let mut visiting = BTreeSet::new();
-    return_type_summary(an, bin, function, &mut visiting, 0)
+    let mut memo = TypeMemo::default();
+    return_type_summary(an, bin, function, &mut visiting, 0, &mut memo)
 }
 
+/// Answers the recursive type walks have already worked out.
+///
+/// Keyed by depth as well as address, because the walk gives up at a fixed
+/// depth: what a function looks like with three levels of budget left is not
+/// what it looks like with none, and one answer must not be served for the
+/// other.
+#[derive(Default)]
+struct TypeMemo {
+    ret: BTreeMap<(u64, usize), Option<CType>>,
+    params: BTreeMap<(u64, usize), Option<Vec<CType>>>,
+}
+
+/// The return type a function's own code implies, remembering what it finds.
+///
+/// Both of these walks mark a function as being visited and unmark it on the
+/// way out, so a function reached down two different call paths is walked
+/// twice — and one reached N ways, 2^N times. At a depth limit of eight that is
+/// not a slow analysis, it is a hang: `knife pseudo` on ucrtbase!sub_18000df50
+/// never returned. The answer for a function at a given remaining depth cannot
+/// change, so it is worked out once.
 fn return_type_summary(
     an: &Analysis,
     bin: &Binary,
     function: &Function,
     visiting: &mut BTreeSet<u64>,
     depth: usize,
+    memo: &mut TypeMemo,
+) -> Option<CType> {
+    let key = (function.addr, depth);
+    if let Some(cached) = memo.ret.get(&key) {
+        return *cached;
+    }
+    // A `None` that only means "already on this path" is about the path, not
+    // about the function, and must not be remembered as if it were an answer.
+    let on_this_path = visiting.contains(&function.addr);
+    let answer = return_type_summary_inner(an, bin, function, visiting, depth, memo);
+    if !on_this_path {
+        memo.ret.insert(key, answer);
+    }
+    answer
+}
+
+fn return_type_summary_inner(
+    an: &Analysis,
+    bin: &Binary,
+    function: &Function,
+    visiting: &mut BTreeSet<u64>,
+    depth: usize,
+    memo: &mut TypeMemo,
 ) -> Option<CType> {
     if depth >= 8 || !visiting.insert(function.addr) {
         return None;
     }
+    // The predecessor map, built once. It used to be rebuilt inside every step
+    // of the backward walk by scanning every block in the function, which is a
+    // second cost on top of the first and for the same reason: work that does
+    // not depend on where the walk currently is.
+    let index: BTreeMap<u64, usize> = function
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(position, block)| (block.start, position))
+        .collect();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); function.blocks.len()];
+    for (position, block) in function.blocks.iter().enumerate() {
+        for successor in &block.succ {
+            if let Some(&target) = index.get(successor) {
+                predecessors[target].push(position);
+            }
+        }
+    }
+    let mut def_memo: BTreeMap<(usize, usize), DefType> = BTreeMap::new();
+
     let mut summary: Option<CType> = None;
     let mut saw_return = false;
 
@@ -1889,7 +1953,9 @@ fn return_type_summary(
             block.insns.len().saturating_sub(1),
             visiting,
             depth,
-            BTreeSet::new(),
+            &predecessors,
+            &mut def_memo,
+            memo,
         );
         let Some(path_type) = path_type else {
             visiting.remove(&function.addr);
@@ -1912,6 +1978,16 @@ fn return_type_summary(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What the backward walk has worked out about one place in the function, or
+/// that it is still working on it.
+#[derive(Clone, Copy)]
+enum DefType {
+    /// On the current path already: a loop, and no answer down it.
+    InProgress,
+    Done(Option<CType>),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn return_def_type(
     an: &Analysis,
     bin: &Binary,
@@ -1920,11 +1996,50 @@ fn return_def_type(
     upto: usize,
     visiting: &mut BTreeSet<u64>,
     depth: usize,
-    mut seen: BTreeSet<usize>,
+    predecessors: &[Vec<usize>],
+    def_memo: &mut BTreeMap<(usize, usize), DefType>,
+    memo: &mut TypeMemo,
 ) -> Option<CType> {
-    if !seen.insert(block_index) {
-        return None;
-    }
+    // Answer each place once. The walk used to carry a set of visited blocks
+    // *per path*, cloning it at every predecessor, so a block reachable two ways
+    // was explored twice and a block reachable N ways 2^N times. On a function
+    // with a twelve-way switch in it that is not slow, it is a hang: `knife
+    // pseudo` on ucrtbase!sub_18000df50 never returned at all.
+    let key = (block_index, upto);
+    match def_memo.get(&key) {
+        Some(DefType::Done(answer)) => return *answer,
+        Some(DefType::InProgress) => return None,
+        None => def_memo.insert(key, DefType::InProgress),
+    };
+    let answer = return_def_type_uncached(
+        an,
+        bin,
+        function,
+        block_index,
+        upto,
+        visiting,
+        depth,
+        predecessors,
+        def_memo,
+        memo,
+    );
+    def_memo.insert(key, DefType::Done(answer));
+    answer
+}
+
+#[allow(clippy::too_many_arguments)]
+fn return_def_type_uncached(
+    an: &Analysis,
+    bin: &Binary,
+    function: &Function,
+    block_index: usize,
+    upto: usize,
+    visiting: &mut BTreeSet<u64>,
+    depth: usize,
+    predecessors: &[Vec<usize>],
+    def_memo: &mut BTreeMap<(usize, usize), DefType>,
+    memo: &mut TypeMemo,
+) -> Option<CType> {
     let block = &function.blocks[block_index];
     let mut info = InstructionInfoFactory::new();
     for raw in block.insns[..upto.min(block.insns.len())].iter().rev() {
@@ -1940,8 +2055,9 @@ fn return_def_type(
                     call_target(&instruction, an, bin).map(|target| an.label(target))
                 })?;
             return prototype(&called).map(|prototype| prototype.0).or_else(|| {
-                an.find_by_name(&called)
-                    .and_then(|callee| return_type_summary(an, bin, callee, visiting, depth + 1))
+                an.find_by_name(&called).and_then(|callee| {
+                    return_type_summary(an, bin, callee, visiting, depth + 1, memo)
+                })
             });
         }
         let writes_return = info.info(&instruction).used_registers().iter().any(|used| {
@@ -1958,15 +2074,8 @@ fn return_def_type(
         return None;
     }
 
-    let predecessors: Vec<usize> = function
-        .blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, predecessor)| predecessor.succ.contains(&block.start))
-        .map(|(index, _)| index)
-        .collect();
     let mut merged: Option<CType> = None;
-    for predecessor in predecessors {
+    for &predecessor in &predecessors[block_index] {
         let ty = return_def_type(
             an,
             bin,
@@ -1975,7 +2084,9 @@ fn return_def_type(
             function.blocks[predecessor].insns.len(),
             visiting,
             depth,
-            seen.clone(),
+            predecessors,
+            def_memo,
+            memo,
         )?;
         merged = Some(match merged {
             None => ty,
@@ -1994,15 +2105,39 @@ fn return_def_type(
 fn internal_parameter_types(an: &Analysis, bin: &Binary, name: &str) -> Option<Vec<CType>> {
     let function = an.find_by_name(name)?;
     let mut visiting = BTreeSet::new();
-    parameter_type_summary(an, bin, function, &mut visiting, 0)
+    let mut memo = TypeMemo::default();
+    parameter_type_summary(an, bin, function, &mut visiting, 0, &mut memo)
 }
 
+/// The parameter types a function's own code implies, remembering what it
+/// finds. Same shape, and same reason, as `return_type_summary`.
 fn parameter_type_summary(
     an: &Analysis,
     bin: &Binary,
     function: &Function,
     visiting: &mut BTreeSet<u64>,
     depth: usize,
+    memo: &mut TypeMemo,
+) -> Option<Vec<CType>> {
+    let key = (function.addr, depth);
+    if let Some(cached) = memo.params.get(&key) {
+        return cached.clone();
+    }
+    let on_this_path = visiting.contains(&function.addr);
+    let answer = parameter_type_summary_inner(an, bin, function, visiting, depth, memo);
+    if !on_this_path {
+        memo.params.insert(key, answer.clone());
+    }
+    answer
+}
+
+fn parameter_type_summary_inner(
+    an: &Analysis,
+    bin: &Binary,
+    function: &Function,
+    visiting: &mut BTreeSet<u64>,
+    depth: usize,
+    memo: &mut TypeMemo,
 ) -> Option<Vec<CType>> {
     if an.bits != 64 || depth >= 8 || !visiting.insert(function.addr) {
         return None;
@@ -2068,7 +2203,14 @@ fn parameter_type_summary(
                             .map(|prototype| prototype.1.to_vec())
                             .or_else(|| {
                                 an.find_by_name(&called).and_then(|callee| {
-                                    parameter_type_summary(an, bin, callee, visiting, depth + 1)
+                                    parameter_type_summary(
+                                        an,
+                                        bin,
+                                        callee,
+                                        visiting,
+                                        depth + 1,
+                                        memo,
+                                    )
                                 })
                             })
                             .unwrap_or_default();
