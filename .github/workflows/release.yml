@@ -37,7 +37,28 @@ jobs:
           else
             tar -czf "dist/${name}.tgz" -C staging .
           fi
+      # The notes are this release's CHANGELOG section. Without a body every
+      # matrix job asked GitHub to generate one and appended it, so the release
+      # for 1.7.0 went out with a compare link repeated four times and not one
+      # word about what had changed. Each job now writes the same body, so it
+      # does not matter which of them gets there first.
+      - name: release notes from the changelog
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 == "## v" v { found = 1; next }
+            found && /^## v/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "no CHANGELOG section for $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          printf '
+**Full Changelog**: https://github.com/%s/compare/%s
+'             "$GITHUB_REPOSITORY" "$(git describe --abbrev=0 --tags "${GITHUB_REF_NAME}^" 2>/dev/null || echo '')...${GITHUB_REF_NAME}" >> notes.md
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: notes.md
