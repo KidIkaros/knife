@@ -1,32 +1,17 @@
 # Changelog
 
-## Unreleased
+## v1.7.0
 
-- `pseudo`: `cbw`, `cwde` and `cdqe` read as the moves they are, the same way
-  `movsxd` already did. Unmodelled they were worse than merely unhelpful: each
-  writes the accumulator, so the value it held was dropped exactly where it was
-  wanted, since `cdqe` is what a compiler puts in front of the
-  `mov ecx, [base+rax*4+D]` that indexes a switch table.
-- `pseudo` no longer hangs. Recovering a function's signature walked the call
-  graph to a depth of eight, marking each function as visited and unmarking it
-  on the way out, so a function reachable down several call paths was walked
-  once per path. The backward walk for the return type did the same thing over
-  basic blocks, cloning its visited set at every predecessor. Both are
-  exponential, and on ucrtbase.dll two functions never finished at all —
-  `sub_18000df50` now takes 3.7s and `sub_180005490` 1.0s. Answers are worked
-  out once per function per remaining depth, which is what they depend on.
-  Output is unchanged: five functions that did complete before decompile
-  byte-for-byte identically, about 18% faster.
-- `pseudo`: an x64 switch reads as a switch, and a case label no longer states a
-  value nobody checked. The jump through a register is lifted as a dispatch on
-  the register the table was indexed by, not the one jumped through, which by
-  then holds an address. The table load and the base-add are the dispatch
-  itself and are dropped, so the selector still names what the reader last saw.
-  Case labels were the position in the table printed as `case 0x0:`, which says
-  the program compared the selector against zero; they now carry a real value
-  only where the guarding range check confirms one — the compared expression
-  must be the selector and the bound must match the number of entries — and
-  read as `/* case 1 of 5 */` otherwise.
+- PE symbols come from the PDB when there is one. knife read no debug
+  information at all, so a stripped MSVC binary showed `sub_140001234` where
+  IDA, Ghidra and WinDbg show a name. The CodeView record in the image names the
+  file to look for, and the GUID and age in it are both checked before a match
+  is used: a PDB from a different build mislabels every function it touches,
+  which is worse than having none. `--pdb PATH` overrides the search, and
+  `knife info` says whether one was matched, missing or rejected, so a name out
+  of a symbol file never looks like a name out of a heuristic. On knife's own
+  binary that is 181,485 names across 279,213 functions, and none of them
+  `sub_`.
 - x64 switch statements are recovered. Jump-table resolution only understood the
   32-bit shape, `jmp [table + i*8]`, so across four real 64-bit binaries — 34,879
   recovered functions — knife resolved **no tables at all**. x64 does not branch
@@ -37,32 +22,16 @@
   reached. Case bodies were absent from the CFG, the call graph, and `audit`'s
   reachability, so a dangerous call inside a switch was a sink knife believed
   nothing could reach.
-- `--json` now means JSON everywhere it is accepted, and is refused where it is
-  not. `name`, `note`, `field`, `type`, `var`, `proto` and `typelib` confirm
-  their edit as JSON instead of printing prose and exiting zero, which is how an
-  applied edit and a quietly ignored one came to look identical to a script.
-  `diff` emits the differences it already computed rather than communicating
-  only through its exit status. `tui`, `mcp` and `completions` have no JSON form
-  and now say so and exit non-zero — `knife --json tui FILE` used to open an
-  interactive UI and hang whatever was waiting on it.
-- Signature scanning is about five times faster, and full triage more than
-  three. The byte search compared the whole needle at every offset, and these
-  needles are long — the AES S-box is 256 bytes — so it ran a length-checked
-  compare 41 million times per signature on a 41 MB library. It now skips on the
-  first byte and compares the rest only on a hit. `knife scan` on that file goes
-  from 2.98s to 0.59s, and `knife FILE` from 4.01s to 1.14s: the scan was three
-  quarters of what triage spent its time on.
-- `pseudo`: a small negative that has been sign-extended to 64 bits prints as
-  itself. `if (r10 < -0x1)` says what it means; `0xffffffffffffffff` leaves the
-  reader doing the arithmetic and invites them to read a sentinel as a mask.
-  Only where it is unambiguous, so `0xffffffff` and `0xffffffff00000000` are
-  untouched.
-- `pseudo`: `lea` used as arithmetic reads as arithmetic. Every `lea` produced
-  an address-of, so the commonest use of the instruction — adding without
-  touching the flags — printed as `&(rbx + 2)`: an operator the machine never
-  applied, around something C has no address for. It now yields `&name` only
-  where the address names storage, a frame slot or a global, and the plain
-  expression everywhere else. `lea` is 5% of the instructions in ucrtbase.dll.
+- `pseudo`: an x64 switch reads as a switch, and a case label no longer states a
+  value nobody checked. The jump through a register is lifted as a dispatch on
+  the register the table was indexed by, not the one jumped through, which by
+  then holds an address. The table load and the base-add are the dispatch
+  itself and are dropped, so the selector still names what the reader last saw.
+  Case labels were the position in the table printed as `case 0x0:`, which says
+  the program compared the selector against zero; they now carry a real value
+  only where the guarding range check confirms one — the compared expression
+  must be the selector and the bound must match the number of entries — and
+  read as `/* case 1 of 5 */` otherwise.
 - `pseudo`: scalar floating point is decompiled. Moves, `+`/`-`/`*`/`/`, the
   `xorps xmm, xmm` that writes zero, the `comis`/`ucomis` compares that feed a
   branch, and the conversions as C casts. Two thirds of everything this lifter
@@ -72,10 +41,6 @@
   taken; a packed operation works on several lanes at once and `a * b` would
   describe one of them. `xmm6`-`xmm15` join the callee-saved registers, so the
   Win64 spills the vector moves now expose stay out of the output.
-- `pseudo`: `neg` and `not` read as `-x` and `~x` instead of becoming comments.
-  Both are bracketed by C's binding, not by the tree's shape, so a negated sum
-  prints `-(a + b)` — `-a + b` is a different value. `ucrtbase!_ltoa`'s
-  negative-number branch now reads `r9d = -r9d;`.
 - `pseudo`: integer division reads as division. `div` and `idiv` were
   unmodelled, so every divide in a function became a verbatim comment and threw
   away the values in `rax` and `rdx` with it. They now lift to `/` and `%` —
@@ -85,54 +50,118 @@
   than a confident sentence about half of it. A genuine double-width dividend
   stays unmodelled. `ucrtbase!_ltoa`'s digit loop now reads
   `edx = r9d % edi; r9d = r9d / edi;`.
+- `pseudo`: `neg` and `not` read as `-x` and `~x` instead of becoming comments.
+  Both are bracketed by C's binding, not by the tree's shape, so a negated sum
+  prints `-(a + b)` — `-a + b` is a different value. `ucrtbase!_ltoa`'s
+  negative-number branch now reads `r9d = -r9d;`.
+- `pseudo`: `lea` used as arithmetic reads as arithmetic. Every `lea` produced
+  an address-of, so the commonest use of the instruction — adding without
+  touching the flags — printed as `&(rbx + 2)`: an operator the machine never
+  applied, around something C has no address for. It now yields `&name` only
+  where the address names storage, a frame slot or a global, and the plain
+  expression everywhere else. `lea` is 5% of the instructions in ucrtbase.dll.
+- `pseudo`: `cbw`, `cwde` and `cdqe` read as the moves they are, the same way
+  `movsxd` already did. Unmodelled they were worse than merely unhelpful: each
+  writes the accumulator, so the value it held was dropped exactly where it was
+  wanted, since `cdqe` is what a compiler puts in front of the
+  `mov ecx, [base+rax*4+D]` that indexes a switch table.
+- `pseudo`: a small negative that has been sign-extended to 64 bits prints as
+  itself. `if (r10 < -0x1)` says what it means; `0xffffffffffffffff` leaves the
+  reader doing the arithmetic and invites them to read a sentinel as a mask.
+  Only where it is unambiguous, so `0xffffffff` and `0xffffffff00000000` are
+  untouched.
+- `pseudo`: an indirect call whose target cannot be resolved reads as
+  `(*rax)(...)` or `(*(rcx + 0x18))(...)`. It used to render as `sub()`, which
+  looks like a call to a function named `sub` — the prefix Knife gives every
+  function it recovers without a symbol.
+- `pseudo` no longer hangs. Recovering a function's signature walked the call
+  graph to a depth of eight, marking each function as visited and unmarking it
+  on the way out, so a function reachable down several call paths was walked
+  once per path. The backward walk for the return type did the same thing over
+  basic blocks, cloning its visited set at every predecessor. Both are
+  exponential, and on ucrtbase.dll two functions never finished at all —
+  `sub_18000df50` now takes 3.7s and `sub_180005490` 1.0s. Answers are worked
+  out once per function per remaining depth, which is what they depend on.
+  Output is unchanged: five functions that did complete before decompile
+  byte-for-byte identically, about 18% faster.
+- The passes that lift instructions refuse an architecture they cannot read
+  rather than guess at it. `pseudo`, `audit` and `drv` are x86/x64 only, but the
+  gate in front of them admitted AArch64, so every four-byte ARM64 word went
+  through the x86 decoder — dropped silently when it failed to decode, and
+  lifted as some unrelated instruction when it happened to succeed. What came
+  out was an empty body, or statements about registers the target does not have.
+  They now name the architecture and point at `knife dis`, which does read it.
+- Mach-O symbols reach the engine. They were parsed and then thrown away, so a
+  Mach-O binary was analysed from its entry point alone and read as `sub_…`
+  throughout even when every function in it was named — while PE and ELF both
+  fed theirs in. A universal binary also says which of its slices is being
+  analysed instead of silently choosing one.
+- `dis` and `pseudo` answer `--json` with JSON. Both accepted the flag and
+  returned ANSI-coloured prose with a zero exit, which a script cannot tell from
+  success.
+- `--json` now means JSON everywhere it is accepted, and is refused where it is
+  not. `name`, `note`, `field`, `type`, `var`, `proto` and `typelib` confirm
+  their edit as JSON instead of printing prose and exiting zero, which is how an
+  applied edit and a quietly ignored one came to look identical to a script.
+  `diff` emits the differences it already computed rather than communicating
+  only through its exit status. `tui`, `mcp` and `completions` have no JSON form
+  and now say so and exit non-zero — `knife --json tui FILE` used to open an
+  interactive UI and hang whatever was waiting on it.
 - The refusal a session gives on an unsupported architecture named the wrong
   set: it said x86/x64 on a gate that accepts AArch64 as well, so it described
   a narrower tool than the one refusing.
-- `docs/MCP.md`: what the MCP server is, how to register it with Claude Code,
-  Claude Desktop and Cursor, the full table of thirty tools, a worked session,
-  and why the transport is stdio. It had one row in the README's command table,
-  which is not enough for anyone to install it.
-- `mcp`: a frame that is not valid JSON, or one over the size limit, is answered
-  with a JSON-RPC parse error instead of being dropped. Dropping it kept the
-  stream framed but left a client that had sent a request waiting for a reply
-  that was never coming, and a hang says less about what went wrong than an
-  error does.
-- `mcp`: the handshake now carries the protocol's `instructions` field, so a
-  client is told what knife is, that it never runs the target, to call `open`
-  first, and to reach for `audit` before disassembling a binary function by
-  function. Thirty tools and no word on which one comes first is thirty tools an
-  agent works out the hard way.
 - `mcp`: a target the client no longer has to keep naming. `knife mcp --file
   PATH` binds a binary up front, the new `open` tool binds or replaces one
   mid-session, and `file` is optional on all thirty tools. An agent repeating an
   absolute path on every call spends its context on bookkeeping, and a path
   retyped is a path mistyped.
-- Bulk output is buffered. `println!` flushes on every newline, which is one
-  write syscall per line; `strings`, `funcs`, and `dis` now share one buffer.
-  `knife strings` on a 327 MB DLL (2.3 million literals) goes from 26.1s to
-  3.9s, and a closed pipe (`knife strings big.dll | head`) exits cleanly
-  instead of panicking.
+- `mcp`: the handshake now carries the protocol's `instructions` field, so a
+  client is told what knife is, that it never runs the target, to call `open`
+  first, and to reach for `audit` before disassembling a binary function by
+  function. Thirty tools and no word on which one comes first is thirty tools an
+  agent works out the hard way.
+- `mcp`: a frame that is not valid JSON, or one over the size limit, is answered
+  with a JSON-RPC parse error instead of being dropped. Dropping it kept the
+  stream framed but left a client that had sent a request waiting for a reply
+  that was never coming, and a hang says less about what went wrong than an
+  error does.
+- `docs/MCP.md`: what the MCP server is, how to register it with Claude Code,
+  Claude Desktop and Cursor, the full table of thirty tools, a worked session,
+  and why the transport is stdio. It had one row in the README's command table,
+  which is not enough for anyone to install it.
+- Signature scanning is about five times faster, and full triage more than
+  three. The byte search compared the whole needle at every offset, and these
+  needles are long — the AES S-box is 256 bytes — so it ran a length-checked
+  compare 41 million times per signature on a 41 MB library. It now skips on the
+  first byte and compares the rest only on a hit. `knife scan` on that file goes
+  from 2.98s to 0.59s, and `knife FILE` from 4.01s to 1.14s: the scan was three
+  quarters of what triage spent its time on.
 - Function recovery is about 30% faster. Cross-references were recorded into a
   `BTreeMap<u64, Vec<_>>` as they were found, which costs a tree descent per
   reference and a heap allocation for every address seen for the first time.
   They are now collected flat and grouped once: on a 25 MB DLL with 1.1 million
   references, recovery drops from 3.39s to 2.39s.
+- Bulk output is buffered. `println!` flushes on every newline, which is one
+  write syscall per line; `strings`, `funcs`, and `dis` now share one buffer.
+  `knife strings` on a 327 MB DLL (2.3 million literals) goes from 26.1s to
+  3.9s, and a closed pipe (`knife strings big.dll | head`) exits cleanly
+  instead of panicking.
 - Instructions cost less memory. The raw bytes are held inline rather than in a
   `Vec` per instruction, and the resolved target name is boxed: 88 bytes plus an
   allocation each becomes 64 bytes and none. Peak memory analysing a 25 MB DLL
   falls from 1084 MB to 827 MB. Two whole-image copies are gone as well: one
   made even when a target had no staged patches, and one the interactive view
   made to hand the binary to its analysis thread.
-- `pseudo`: an indirect call whose target cannot be resolved reads as
-  `(*rax)(...)` or `(*(rcx + 0x18))(...)`. It used to render as `sub()`, which
-  looks like a call to a function named `sub` — the prefix Knife gives every
-  function it recovers without a symbol.
+- The analysis cache is schema 3: the instruction layout changed, and then the
+  engine started resolving x64 jump tables, so a stored analysis of the same
+  binary has different functions and edges in it. An older cache is recomputed
+  rather than read. The schema is the only thing that invalidates a cache
+  between builds of one version — the entry also records the knife version, but
+  that does not change while a version is being developed.
 - `tui`: the left pane grows with the terminal instead of staying at 38
   columns, and the attack-surface and function rows take their column widths
   from the pane they are drawn into, so the containing function is no longer
   cut short on every row.
-- The analysis cache is schema 2, for the instruction layout above. An older
-  cache is recomputed rather than read.
 - Dropped the unused `memmap2` dependency.
 - The README animation is rendered, not captured: `--features record` builds a
   recorder that drives the real interface off-screen through a scripted session
