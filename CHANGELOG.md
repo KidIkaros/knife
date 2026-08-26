@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `pseudo`: an x64 switch reads as a switch, and a case label no longer states a
+  value nobody checked. The jump through a register is lifted as a dispatch on
+  the register the table was indexed by, not the one jumped through, which by
+  then holds an address. The table load and the base-add are the dispatch
+  itself and are dropped, so the selector still names what the reader last saw.
+  Case labels were the position in the table printed as `case 0x0:`, which says
+  the program compared the selector against zero; they now carry a real value
+  only where the guarding range check confirms one — the compared expression
+  must be the selector and the bound must match the number of entries — and
+  read as `/* case 1 of 5 */` otherwise.
 - x64 switch statements are recovered. Jump-table resolution only understood the
   32-bit shape, `jmp [table + i*8]`, so across four real 64-bit binaries — 34,879
   recovered functions — knife resolved **no tables at all**. x64 does not branch

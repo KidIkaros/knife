@@ -504,6 +504,26 @@ struct Lift {
     /// The stack pointer's offset from entry, and the registers aliasing it, so a
     /// frame-pointer-less function still gets named `rsp`-relative slots.
     stack: StackSt,
+    /// The x64 switch dispatch being assembled, if any. Block-local: the load,
+    /// the add and the jump are always consecutive, and the engine tracks the
+    /// same shape to resolve the targets. Both have to agree, or the pseudocode
+    /// would print a switch beside successors that are not its cases.
+    switch: Option<PendingSwitch>,
+}
+
+/// The registers an x64 switch dispatch is being built out of: an offset loaded
+/// from a table, the base added back, then a jump through the result.
+#[derive(Clone)]
+struct PendingSwitch {
+    dst: Register,
+    /// The selector, captured where the table was indexed by it rather than
+    /// read at the jump. The two are often the same register — `mov ecx,
+    /// [base+rcx*4+D]` then `add rcx, base` — so by the jump it holds an
+    /// address, and reading it there names the table entry instead of the value
+    /// the program switched on.
+    sel: Expr,
+    base: Register,
+    ready: bool,
 }
 
 type Cmp = (Expr, Expr, FlagSrc);
@@ -1021,6 +1041,17 @@ fn lift_insn(
             None if d.op0_kind() == OpKind::Memory && d.memory_index() != Register::None => {
                 Stmt::Switch(reg_val(st, d.memory_index()))
             }
+            // A jump through a register is a switch too when it is the end of
+            // the x64 dispatch shape. The selector is the register the table was
+            // indexed by, not the one being jumped through: by now that one
+            // holds an address, and `switch (rcx)` would name the wrong value.
+            None if st
+                .switch
+                .as_ref()
+                .is_some_and(|p| p.ready && d.op0_register().full_register() == p.dst) =>
+            {
+                Stmt::Switch(st.switch.as_ref().expect("checked above").sel.clone())
+            }
             None => asm_stmt(d),
         }),
         m if is_jcc(m) => Some(match branch_target(d) {
@@ -1059,6 +1090,26 @@ fn lift_insn(
         st.cmp = None;
     }
 
+    // Follow the x64 switch dispatch, so the jump that ends it can be read as
+    // one. Updated after the statement is built, so the `jmp` still sees the
+    // state the `add` before it left.
+    let (next_switch, completes_dispatch) = switch_step(d, st, st.switch.clone());
+    // The table load is dispatch mechanics too, and on x64 it destroys the very
+    // register it indexed by: `mov ecx, [base+rcx*4+D]` writes ecx, which zeroes
+    // the top half of rcx. Left in, it sits directly above `switch (rcx)` and
+    // makes the selector name a value the machine no longer holds. It is taken
+    // back out only once the `add` proves this really was a dispatch, so a load
+    // that merely looks like one is never hidden.
+    if completes_dispatch {
+        if let Some(p) = &next_switch {
+            if matches!(out.last(), Some(Stmt::Set(Expr::Reg(root, _), Expr::Mem(_))) if *root == p.dst)
+            {
+                out.pop();
+            }
+        }
+    }
+    st.switch = next_switch;
+
     let ptr = if an.bits == 64 { 8 } else { 4 };
     update_stack(st, d, ptr);
 
@@ -1084,7 +1135,14 @@ fn lift_insn(
         ) || matches!(
             &s,
             Stmt::Set(Expr::Reg(dr, _), Expr::Mem(a)) if is_callee_saved(*dr) && is_stack_slot(a)
-        );
+        )
+        // The `add` that turns a table entry into an address is the dispatch
+        // itself, not something the program computes. Dropping it also leaves
+        // the selector meaning what it says: the register it names is often the
+        // one this `add` would overwrite, and a `switch (rcx)` printed under a
+        // fresh `rcx = ...` reads as the wrong value. The load above it is then
+        // dead and goes the same way.
+        || completes_dispatch;
         if !housekeeping {
             out.push(s);
         }
@@ -1181,6 +1239,61 @@ fn dividend_is_extended(
     } else {
         held == Expr::Const(0)
     }
+}
+
+/// Advance the x64 switch dispatch by one instruction.
+///
+/// The engine tracks the same three steps to resolve the table; this side only
+/// needs to know which register was the selector, so that the `jmp` reads as a
+/// switch on the right value. Kept as permissive as the engine's, so the two
+/// agree on which jumps are switches — one recognising it and the other not is
+/// how a `switch` would come to be printed beside blocks that are not its cases.
+fn switch_step(
+    d: &Instruction,
+    st: &Lift,
+    cur: Option<PendingSwitch>,
+) -> (Option<PendingSwitch>, bool) {
+    // `mov r32, [B + I*4 + D]` — the load of one table entry.
+    if d.mnemonic() == Mnemonic::Mov
+        && d.op_count() == 2
+        && d.op0_kind() == OpKind::Register
+        && d.op1_kind() == OpKind::Memory
+        && d.memory_index_scale() == 4
+        && d.memory_index() != Register::None
+        && d.memory_base() != Register::None
+    {
+        return (
+            Some(PendingSwitch {
+                dst: d.op0_register().full_register(),
+                sel: reg_val(st, d.memory_index()),
+                base: d.memory_base().full_register(),
+                ready: false,
+            }),
+            false,
+        );
+    }
+    let Some(mut p) = cur else {
+        return (None, false);
+    };
+    // `add dst, B` — the displacement becomes an address.
+    if !p.ready
+        && d.mnemonic() == Mnemonic::Add
+        && d.op_count() == 2
+        && d.op0_kind() == OpKind::Register
+        && d.op0_register().full_register() == p.dst
+        && d.op1_kind() == OpKind::Register
+        && d.op1_register().full_register() == p.base
+    {
+        p.ready = true;
+        return (Some(p), true);
+    }
+    // Anything else writing the register the shape resolves into means it no
+    // longer describes what the machine holds. The selector needs no such check:
+    // it was copied at the load, not read at the jump.
+    if d.op0_kind() == OpKind::Register && d.op0_register().full_register() == p.dst {
+        return (None, false);
+    }
+    (Some(p), false)
 }
 
 /// Update the propagation state from an emitted statement: remember a register's
@@ -3194,6 +3307,42 @@ impl Ir<'_> {
     /// selector's immediate post-dominator. Cases sharing a target are grouped;
     /// each case body is emitted inline and ended with a `break` so they do not
     /// fall through. Returns the follow block to continue from.
+    /// The case values, when the range check that guards the dispatch says what
+    /// they are.
+    ///
+    /// A switch is reached by falling through `cmp sel, N` / `ja default`, so
+    /// the predecessor's condition carries the upper bound and the values are
+    /// `0..=N`. Two things must agree before it is believed: the compared
+    /// expression must be the selector, and `N + 1` must be exactly the number
+    /// of entries read out of the table. Either one alone can line up by
+    /// accident; together they are the same fact told twice.
+    fn switch_values(&self, node: usize, sel: &Expr, cases: usize) -> Option<Vec<u64>> {
+        for (i, succ) in self.cfg.succ.iter().enumerate() {
+            if !succ.contains(&node) {
+                continue;
+            }
+            let Term::Cond { cond, .. } = &self.cfg.term[i] else {
+                continue;
+            };
+            // `ja default` guards the dispatch, so the taken edge leaves it and
+            // the condition reads as `sel > N`.
+            let Expr::Bin(">", left, right) = cond else {
+                continue;
+            };
+            let Expr::Const(hi) = right.as_ref() else {
+                continue;
+            };
+            if left.as_ref() != sel {
+                continue;
+            }
+            if (*hi as usize).checked_add(1) != Some(cases) {
+                continue;
+            }
+            return Some((0..=*hi).collect());
+        }
+        None
+    }
+
     fn emit_switch(
         &mut self,
         node: usize,
@@ -3220,10 +3369,20 @@ impl Ir<'_> {
             }
         }
 
+        // The only place the real case values exist is the range check that
+        // guards the dispatch. Without it the position in the table is all that
+        // is known, and a position is not a value: printing `case 0x2:` for the
+        // third entry states something about the program that was never checked.
+        let values = self.switch_values(node, &sel, cases.len());
+        let total = cases.len();
+
         self.push(indent, format!("switch ({}) {{", render_expr(&sel, self.r)));
         for (t, idxs) in groups {
             for i in idxs {
-                self.push(indent + 1, format!("case 0x{i:x}:"));
+                match &values {
+                    Some(v) => self.push(indent + 1, format!("case 0x{:x}:", v[i])),
+                    None => self.push(indent + 1, format!("/* case {} of {total} */", i + 1)),
+                }
             }
             if Some(t) == follow {
                 // The case goes straight to the reconvergence point.
@@ -4621,6 +4780,101 @@ mod tests {
         assert_eq!(render_const(0x1c), "0x1c");
     }
 
+    /// One ELF section of raw code, so the image base is zero and a table entry
+    /// reads as the address it points at.
+    fn lines_elf_x64(code: Vec<u8>) -> Vec<Line> {
+        let va = 0x1000u64;
+        let mut bin = Binary::stub(Format::Elf, Arch::X86_64);
+        bin.entry = va;
+        bin.sections = vec![Section {
+            name: ".text".into(),
+            vaddr: va,
+            vsize: code.len() as u64,
+            file_off: va,
+            file_size: code.len() as u64,
+            entropy: 0.0,
+            read: true,
+            write: false,
+            exec: true,
+        }];
+        let mut bytes = vec![0u8; va as usize];
+        bytes.extend_from_slice(&code);
+        let an = engine::analyze(&bin, &bytes, 10_000, &Db::default());
+        let f = an.find_function(va).unwrap();
+        decompile(&an, &bin, f, &BTreeMap::new(), &Db::default())
+    }
+
+    fn x64_dispatch() -> Vec<u8> {
+        //   0x1000: lea r14, [rip-0x1007]        -> r14 = 0, the image base
+        //   0x1007: mov ecx, [r14+rax*4+0x2000]
+        //   0x100f: add rcx, r14
+        //   0x1012: jmp rcx
+        let mut code = vec![0u8; 0x1010];
+        code[0x0000] = 0x4c;
+        code[0x0001] = 0x8d;
+        code[0x0002] = 0x35;
+        code[0x0003..0x0007].copy_from_slice(&(-0x1007i32).to_le_bytes());
+        code[0x0007] = 0x41;
+        code[0x0008] = 0x8b;
+        code[0x0009] = 0x8c;
+        code[0x000a] = 0x86;
+        code[0x000b..0x000f].copy_from_slice(&0x2000u32.to_le_bytes());
+        code[0x000f] = 0x49;
+        code[0x0010] = 0x03;
+        code[0x0011] = 0xce;
+        code[0x0012] = 0xff;
+        code[0x0013] = 0xe1;
+        code[0x0014] = 0xc3; // case target, 0x1014
+        code[0x0015] = 0xc3; // case target, 0x1015
+        code[0x1000..0x1004].copy_from_slice(&0x1014u32.to_le_bytes());
+        code[0x1004..0x1008].copy_from_slice(&0x1015u32.to_le_bytes());
+        code
+    }
+
+    #[test]
+    fn an_x64_dispatch_reads_as_a_switch_on_the_selector() {
+        let text = lines_elf_x64(x64_dispatch())
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("switch (rax)"),
+            "the selector is the register the table was indexed by, not the one \
+             jumped through, which by then holds an address:\n{text}"
+        );
+        assert!(
+            !text.contains("jmp rcx"),
+            "the dispatch should not also stay as verbatim assembly:\n{text}"
+        );
+        // The load and the add are the dispatch itself. Left in, the load sits
+        // above the switch writing the very register the selector names.
+        assert!(
+            !text.contains("+ 0x2000"),
+            "the table load is mechanism, not program:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_case_label_states_a_position_when_no_range_check_gives_a_value() {
+        // Nothing here bounds the selector, so the only thing known about a case
+        // is where it sits in the table. A position is not a value, and
+        // `case 0x1:` would claim the program tested for one.
+        let text = lines_elf_x64(x64_dispatch())
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("/* case 1 of 2 */") && text.contains("/* case 2 of 2 */"),
+            "unbounded cases should read as positions:\n{text}"
+        );
+        assert!(
+            !text.contains("case 0x0:"),
+            "a table position must not be printed as a selector value:\n{text}"
+        );
+    }
+
     #[test]
     fn a_store_feeding_an_unmodelled_instruction_is_not_dead() {
         // mov rcx, 7 ; div rcx ; ret
@@ -5265,16 +5519,25 @@ mod tests {
             joined.contains("switch ("),
             "an indexed jump should become a switch, got:\n{joined}"
         );
+        // Nothing in this fixture bounds the selector, so the cases are known
+        // by position and not by value. They used to print as `case 0x0:`,
+        // which states that the program tested the selector against zero. It
+        // was the index into the table, and the two are only the same number
+        // when the switch happens to start there.
         for (case, val) in [
-            ("case 0x0:", "0xaa"),
-            ("case 0x1:", "0xbb"),
-            ("case 0x2:", "0xcc"),
+            ("/* case 1 of 3 */", "0xaa"),
+            ("/* case 2 of 3 */", "0xbb"),
+            ("/* case 3 of 3 */", "0xcc"),
         ] {
             assert!(
                 joined.contains(case) && joined.contains(val),
                 "case {case} with body {val} should be recovered, got:\n{joined}"
             );
         }
+        assert!(
+            !joined.contains("case 0x"),
+            "a table position must not be printed as a selector value:\n{joined}"
+        );
     }
 
     #[test]
