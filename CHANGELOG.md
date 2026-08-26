@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `pseudo`: `cbw`, `cwde` and `cdqe` read as the moves they are, the same way
+  `movsxd` already did. Unmodelled they were worse than merely unhelpful: each
+  writes the accumulator, so the value it held was dropped exactly where it was
+  wanted, since `cdqe` is what a compiler puts in front of the
+  `mov ecx, [base+rax*4+D]` that indexes a switch table.
 - `pseudo` no longer hangs. Recovering a function's signature walked the call
   graph to a depth of eight, marking each function as visited and unmarking it
   on the way out, so a function reachable down several call paths was walked

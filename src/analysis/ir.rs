@@ -917,6 +917,19 @@ fn lift_insn(
             }
             _ => Some(asm_stmt(d)),
         },
+        // Widening the accumulator in place. `cdqe` is `movsxd rax, eax` with
+        // the operands implied, and it is read the same way: as the move it is.
+        // Unmodelled it was worse than unhelpful — it writes rax, so the
+        // propagated value was dropped at exactly the point it was wanted,
+        // right in front of the `mov ecx, [base+rax*4+D]` of a switch.
+        Cbw | Cwde | Cdqe => {
+            let (wide, narrow) = match d.mnemonic() {
+                Cbw => (Register::AX, Register::AL),
+                Cwde => (Register::EAX, Register::AX),
+                _ => (Register::RAX, Register::EAX),
+            };
+            Some(Stmt::Set(reg(wide), reg_val(st, narrow)))
+        }
         // The sign fill a signed divide runs on first. Emitted as an ordinary
         // statement rather than hidden: when the divide that follows is one
         // this lifter can read, nothing reads the high half and the assignment
@@ -4002,8 +4015,9 @@ fn preserves_flags(m: Mnemonic) -> bool {
     matches!(
         m,
         Mov | Movzx | Movsx | Movsxd | Lea | Push | Pop | Nop | Endbr32 | Endbr64
-        // the sign fills touch no flags, so a compare survives across one
-        | Cdq | Cqo | Cwd
+        // the sign fills and the widenings touch no flags, so a compare
+        // survives across one
+        | Cdq | Cqo | Cwd | Cbw | Cwde | Cdqe
         // `not` is the one bitwise instruction that leaves the flags alone
         | Not
     ) || is_sse_move(m)
@@ -5014,6 +5028,30 @@ mod tests {
         assert!(
             !text.contains("case 0x0:"),
             "a table position must not be printed as a selector value:\n{text}"
+        );
+    }
+
+    #[test]
+    fn widening_the_accumulator_keeps_the_value_it_widened() {
+        // mov eax, ecx ; cdqe ; mov [rdx], rax ; ret
+        //
+        // `cdqe` writes rax, so leaving it unmodelled dropped whatever rax held
+        // — right where a switch is about to index a table by it.
+        let text = joined_x64(vec![
+            0x8b, 0xc1, // mov eax, ecx
+            0x48, 0x98, // cdqe
+            0x48, 0x89, 0x02, // mov [rdx], rax
+            0xc3, // ret
+        ]);
+        assert!(
+            !text.contains("cdqe"),
+            "it should not stay verbatim:
+{text}"
+        );
+        assert!(
+            text.contains("ecx"),
+            "the widened value should survive the widening:
+{text}"
         );
     }
 
