@@ -11,9 +11,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-// 2: instruction bytes moved inline, so the on-disk layout changed. A cache
-// written by an older build is simply recomputed.
-const SCHEMA: u32 = 2;
+// 2: instruction bytes moved inline, so the on-disk layout changed.
+// 3: the engine resolves x64 jump tables, so a stored analysis of the same
+//    binary has different functions and edges in it. The schema is the only
+//    thing that invalidates a cache between builds of one version — the entry
+//    also carries `knife_version`, but that does not change while a version is
+//    being developed, so an engine change is invisible without this. It cost me
+//    an afternoon of measuring a cache instead of the code I had just written.
+// A cache written by an older build is simply recomputed.
+const SCHEMA: u32 = 3;
 const MAGIC: &[u8; 8] = b"KNFANLYS";
 
 #[derive(Deserialize)]

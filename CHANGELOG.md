@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- x64 switch statements are recovered. Jump-table resolution only understood the
+  32-bit shape, `jmp [table + i*8]`, so across four real 64-bit binaries — 34,879
+  recovered functions — knife resolved **no tables at all**. x64 does not branch
+  through the table: it loads a 32-bit displacement out of it, adds the base
+  back, and jumps through a register, and `jmp rax` was explicitly documented as
+  having no table. Both shapes are now read. On ucrtbase.dll that is 0 tables to
+  60, across 53 functions, and three functions that no control flow previously
+  reached. Case bodies were absent from the CFG, the call graph, and `audit`'s
+  reachability, so a dangerous call inside a switch was a sink knife believed
+  nothing could reach.
 - `--json` now means JSON everywhere it is accepted, and is refused where it is
   not. `name`, `note`, `field`, `type`, `var`, `proto` and `typelib` confirm
   their edit as JSON instead of printing prose and exiting zero, which is how an

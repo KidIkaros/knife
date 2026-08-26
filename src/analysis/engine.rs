@@ -438,6 +438,16 @@ fn in_exec(bin: &Binary, base: u64, va: u64) -> bool {
 }
 
 /// Does this address land in any mapped section?
+/// Whether an address the code computed is one worth remembering as a base.
+///
+/// The image base is not inside any section — it is where the headers are — and
+/// it is the single most common base an x64 switch is addressed from: a
+/// `lea r14, [rip+x]` that resolves to it, then `[r14 + i*4 + table]`. Excluding
+/// it is why no table in any 64-bit binary was ever found.
+fn known_address(bin: &Binary, base: u64, va: u64) -> bool {
+    va == base || is_mapped(bin, base, va)
+}
+
 fn is_mapped(bin: &Binary, base: u64, va: u64) -> bool {
     let Some(rva) = va.checked_sub(base) else {
         return false;
@@ -523,6 +533,149 @@ fn jump_table_base(
         return Some(disp);
     }
     None
+}
+
+/// The most entries a jump table may have.
+///
+/// The count comes out of the file, so a corrupt one must cost a bounded amount
+/// of work rather than whatever the input asks for. Real switches are far
+/// smaller than this; the ceiling is for the dishonest case, not the honest one.
+const MAX_TABLE_ENTRIES: usize = 4096;
+
+/// A switch dispatch being assembled, tracked across the straight line it always
+/// occupies.
+///
+/// x64 does not address a switch the way 32-bit code does. There is no indexed
+/// branch: the table holds 32-bit displacements, the code loads one, adds the
+/// base back, and jumps through a register. Nothing about the `jmp` says where
+/// the table was, so the two instructions in front of it have to be remembered.
+#[derive(Clone, Copy)]
+struct PendingTable {
+    /// Register holding the loaded offset, and then the resolved target.
+    dst: iced_x86::Register,
+    /// The selector, as indexed into the table.
+    index: iced_x86::Register,
+    /// The value added back to turn an entry into an address.
+    base: u64,
+    /// Absolute address of the table of offsets.
+    table: u64,
+    /// Whether the `add` that completes the shape has been seen.
+    ready: bool,
+}
+
+/// Advance the x64 switch shape by one instruction, or report that this
+/// instruction is not part of it.
+fn pending_step(
+    insn: &Instruction,
+    regs: &HashMap<iced_x86::Register, u64>,
+    pending: Option<PendingTable>,
+) -> Option<PendingTable> {
+    // `mov r32, [B + I*4 + D]` where B is a base we watched being loaded: the
+    // table starts at B + D and this is the load of one of its entries.
+    if insn.mnemonic() == iced_x86::Mnemonic::Mov
+        && insn.op_count() == 2
+        && insn.op0_kind() == iced_x86::OpKind::Register
+        && insn.op1_kind() == iced_x86::OpKind::Memory
+        && insn.memory_index_scale() == 4
+        && insn.memory_index() != iced_x86::Register::None
+    {
+        if let Some(&b) = regs.get(&insn.memory_base().full_register()) {
+            return Some(PendingTable {
+                dst: insn.op0_register().full_register(),
+                index: insn.memory_index().full_register(),
+                base: b,
+                table: b.wrapping_add(insn.memory_displacement64()),
+                ready: false,
+            });
+        }
+    }
+    // `add dst, B` with the same base completes it: the offset has become an
+    // address. Requiring the *same* base is what keeps an unrelated `add` from
+    // turning a half-recognised shape into a table that was never there.
+    let mut p = pending?;
+    if !p.ready
+        && insn.mnemonic() == iced_x86::Mnemonic::Add
+        && insn.op_count() == 2
+        && insn.op0_kind() == iced_x86::OpKind::Register
+        && insn.op0_register().full_register() == p.dst
+        && insn.op1_kind() == iced_x86::OpKind::Register
+        && regs.get(&insn.op1_register().full_register()) == Some(&p.base)
+    {
+        p.ready = true;
+        return Some(p);
+    }
+    None
+}
+
+/// Table entries that are absolute addresses: the 32-bit `jmp [table + i*4]`
+/// shape and its 64-bit spelling.
+///
+/// Stops at the first entry that is not code, which is the only thing the table
+/// itself says about where it ends.
+fn absolute_table(bin: &Binary, base: u64, bytes: &[u8], table: u64) -> Vec<u64> {
+    let width = if bin.bits == 64 { 8usize } else { 4 };
+    let mut out = Vec::new();
+    let mut at = table;
+    for _ in 0..MAX_TABLE_ENTRIES {
+        let Some(off) = va_to_off(bin, base, at) else {
+            break;
+        };
+        let Some(e) = bytes.get(off..off + width) else {
+            break;
+        };
+        let t = if width == 8 {
+            u64::from_le_bytes(e.try_into().expect("eight bytes"))
+        } else {
+            u64::from(u32::from_le_bytes(e.try_into().expect("four bytes")))
+        };
+        if t == 0 || !in_exec(bin, base, t) {
+            break;
+        }
+        out.push(t);
+        at += width as u64;
+    }
+    out
+}
+
+/// Table entries that are 32-bit offsets from a base the code adds back: how
+/// x64 addresses a switch.
+///
+/// Returns nothing unless this jump is through the very register the tracked
+/// shape resolved into — a bare `jmp rax` that no table explains stays an
+/// unresolved indirect branch rather than becoming a guess.
+fn offset_table(
+    bin: &Binary,
+    base: u64,
+    bytes: &[u8],
+    insn: &Instruction,
+    pending: Option<PendingTable>,
+) -> Option<(u64, Vec<u64>)> {
+    let p = pending?;
+    if !p.ready
+        || insn.op0_kind() != iced_x86::OpKind::Register
+        || insn.op0_register().full_register() != p.dst
+    {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut at = p.table;
+    for _ in 0..MAX_TABLE_ENTRIES {
+        let Some(off) = va_to_off(bin, base, at) else {
+            break;
+        };
+        let Some(e) = bytes.get(off..off + 4) else {
+            break;
+        };
+        let t = p.base.wrapping_add(u64::from(u32::from_le_bytes(
+            e.try_into().expect("four bytes"),
+        )));
+        if !in_exec(bin, base, t) {
+            break;
+        }
+        out.push(t);
+        at += 4;
+    }
+    Some((p.table, out))
 }
 
 /// Turn the flat list of references collected during recovery into the map the
@@ -805,6 +958,9 @@ fn build_function(
         let mut insns = Vec::new();
         let mut succ = Vec::new();
         let mut end = block_start;
+        // Block-local, unlike `regs`: the load, the add and the jump are always
+        // consecutive, so a shape that crosses a branch is not one.
+        let mut pending: Option<PendingTable> = None;
 
         loop {
             if spent >= budget {
@@ -876,7 +1032,8 @@ fn build_function(
                 // invented successors for it. Implicit writes count — a `call`
                 // clobbers the caller-saved registers, a `div` writes rdx:rax.
                 let mut info = InstructionInfoFactory::new();
-                for u in info.info(insn).used_registers() {
+                let used = info.info(insn).used_registers();
+                for u in used {
                     if matches!(
                         u.access(),
                         OpAccess::Write
@@ -894,13 +1051,13 @@ fn build_function(
                         && insn.is_ip_rel_memory_operand()
                     {
                         let t = insn.ip_rel_memory_address();
-                        is_mapped(bin, base, t).then_some(t)
+                        known_address(bin, base, t).then_some(t)
                     } else if insn.mnemonic() == iced_x86::Mnemonic::Mov
                         && insn.op_count() == 2
                         && insn.op1_kind() == iced_x86::OpKind::Immediate64
                     {
                         let t = insn.immediate64();
-                        is_mapped(bin, base, t).then_some(t)
+                        known_address(bin, base, t).then_some(t)
                     } else {
                         None
                     };
@@ -908,6 +1065,30 @@ fn build_function(
                         regs.insert(reg, t);
                     }
                 }
+
+                // The instruction that starts or completes the switch shape is
+                // not a disturbance to it. Anything else that writes either of
+                // its registers is, and afterwards it no longer describes what
+                // the machine holds — the same rule `regs` above follows, and
+                // for the same reason: a stale shape does not miss a table, it
+                // invents one.
+                pending = match pending_step(insn, &regs, pending) {
+                    Some(p) => Some(p),
+                    None => pending.filter(|p| {
+                        !used.iter().any(|u| {
+                            matches!(
+                                u.access(),
+                                OpAccess::Write
+                                    | OpAccess::CondWrite
+                                    | OpAccess::ReadWrite
+                                    | OpAccess::ReadCondWrite
+                            ) && {
+                                let w = u.register().full_register();
+                                w == p.dst || w == p.index
+                            }
+                        })
+                    }),
+                };
             }
 
             match flow {
@@ -1008,32 +1189,21 @@ fn build_function(
                                 xrefs_from.push((addr, Ref { to: slot, kind }));
                             }
                         }
-                        // An indexed branch that no import slot explains is a
-                        // switch: `jmp [table + i*8]`. The table entries are
-                        // real control-flow edges, and without them the cases
-                        // look unreachable.
+                        // An indirect branch that no import slot explains is
+                        // a switch, in one of the two shapes a compiler writes:
+                        // 32-bit code branches through the table, x64 code loads
+                        // an offset out of it and adds the base back. The
+                        // entries are real control-flow edges either way, and
+                        // without them the cases look unreachable.
                         if target.is_none() && flow == FlowControl::IndirectBranch {
-                            if let Some(table) = jump_table_base(bin, insn, &regs) {
-                                let width = if bin.bits == 64 { 8usize } else { 4 };
-                                let mut at = table;
-                                for read in 0..4096usize {
-                                    let Some(off) = va_to_off(bin, base, at) else {
-                                        break;
-                                    };
-                                    let Some(e) = bytes.get(off..off + width) else {
-                                        break;
-                                    };
-                                    let t = if bin.bits == 64 {
-                                        u64::from_le_bytes(e.try_into().unwrap())
-                                    } else {
-                                        u32::from_le_bytes(e.try_into().unwrap()) as u64
-                                    };
-                                    if t == 0 || !in_exec(bin, base, t) {
-                                        break;
-                                    }
-                                    if read == 0 {
-                                        tables.push(table);
-                                    }
+                            let found = jump_table_base(bin, insn, &regs)
+                                .map(|t| (t, absolute_table(bin, base, bytes, t)))
+                                .or_else(|| offset_table(bin, base, bytes, insn, pending));
+                            if let Some((table, targets)) = found {
+                                if !targets.is_empty() {
+                                    tables.push(table);
+                                }
+                                for t in targets {
                                     xrefs_to.push((
                                         t,
                                         Xref {
@@ -1051,7 +1221,6 @@ fn build_function(
                                     if queue_block(t, &mut seen, &mut worklist) {
                                         succ.push(t);
                                     }
-                                    at += width as u64;
                                 }
                             }
                         }
@@ -1342,6 +1511,75 @@ mod tests {
                 "case {case:#x} became a block"
             );
         }
+    }
+
+    #[test]
+    fn an_x64_offset_table_brings_the_cases_in() {
+        // The shape MSVC actually emits for a 64-bit switch. There is no indexed
+        // branch: the table holds 32-bit displacements from a base, the code
+        // loads one, adds the base back, and jumps through the register.
+        //
+        //   0x4000: lea r14, [rip-0x4007]          -> r14 = 0 (the image base)
+        //   0x4007: mov ecx, [r14+rax*4+0x5000]    -> an entry of the table
+        //   0x400f: add rcx, r14                   -> displacement becomes address
+        //   0x4012: jmp rcx
+        let mut code = vec![0u8; 0x2010];
+        code[0x0000] = 0x4c; // lea r14, [rip + d]
+        code[0x0001] = 0x8d;
+        code[0x0002] = 0x35;
+        code[0x0003..0x0007].copy_from_slice(&(-0x4007i32).to_le_bytes());
+        code[0x0007] = 0x41; // mov ecx, [r14 + rax*4 + 0x5000]
+        code[0x0008] = 0x8b;
+        code[0x0009] = 0x8c;
+        code[0x000a] = 0x86;
+        code[0x000b..0x000f].copy_from_slice(&0x5000u32.to_le_bytes());
+        code[0x000f] = 0x49; // add rcx, r14
+        code[0x0010] = 0x03;
+        code[0x0011] = 0xce;
+        code[0x0012] = 0xff; // jmp rcx
+        code[0x0013] = 0xe1;
+        // The table: displacements from a zero base, so they read as addresses.
+        code[0x1000..0x1004].copy_from_slice(&0x6000u32.to_le_bytes());
+        code[0x1004..0x1008].copy_from_slice(&0x6007u32.to_le_bytes());
+        code[0x1008..0x100c].copy_from_slice(&0x600eu32.to_le_bytes());
+        // cases
+        code[0x2000] = 0xc3;
+        code[0x2007] = 0xc3;
+        code[0x200e] = 0xc3;
+
+        let (bin, bytes) = code_at(0x4000, &code);
+        let an = analyze(&bin, &bytes, 10_000, &Db::default());
+        let sw = an.find_function(0x4000).expect("entry recovered");
+        assert_eq!(sw.tables, vec![0x5000], "the table is attributed");
+        for case in [0x6000u64, 0x6007, 0x600e] {
+            assert!(
+                an.xrefs_from
+                    .get(&0x4012)
+                    .is_some_and(|r| r.iter().any(|x| x.to == case)),
+                "case 0x{case:x} should be an edge from the jump"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_indirect_jump_invents_no_table() {
+        // The same jump with nothing in front of it explaining a table. It must
+        // stay an unresolved indirect branch: a guess here would put edges into
+        // whatever the bytes after some unrelated address happen to be.
+        let mut code = vec![0u8; 0x2010];
+        code[0x0000] = 0xff; // jmp rcx
+        code[0x0001] = 0xe1;
+        code[0x1000..0x1004].copy_from_slice(&0x6000u32.to_le_bytes());
+        code[0x2000] = 0xc3;
+
+        let (bin, bytes) = code_at(0x4000, &code);
+        let an = analyze(&bin, &bytes, 10_000, &Db::default());
+        let f = an.find_function(0x4000).expect("entry recovered");
+        assert!(
+            f.tables.is_empty(),
+            "no table should be claimed: {:?}",
+            f.tables
+        );
     }
 
     #[test]
