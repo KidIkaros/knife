@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import knifechan from "./assets/knifechan.png";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   api,
   type BinaryDetail,
@@ -154,6 +155,9 @@ export default function App() {
   const [targets, setTargets] = useState<TargetRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState("");
+  // True only while a file is being dragged over the window, to show the drop
+  // hint. The drop itself goes through the same open path as the file dialog.
+  const [dragging, setDragging] = useState(false);
   // Pane sizes are dragged, not fixed: a wide monitor should give the code more
   // room, and a demangled C++ name needs a wider list than `sub_1400a2c0` does.
   const [leftW, setLeftW] = useState(() => loadNum("knife.leftW", 340));
@@ -751,6 +755,42 @@ export default function App() {
   const pickAndOpen = useCallback(async () => {
     const file = await openDialog({ multiple: false, directory: false });
     if (typeof file === "string") void doOpen(file);
+  }, [doOpen]);
+
+  // Drop a binary anywhere on the window to open it. Tauri intercepts the OS
+  // drag-drop itself (the webview's own HTML5 drop never fires), so we listen to
+  // its event and route a dropped path through the exact same `doOpen` the file
+  // dialog uses — a dropped file and a picked one are indistinguishable after
+  // this. `busy` guards against dropping mid-analysis; only the first path is
+  // taken, matching the dialog's single-select.
+  const dropBusy = useRef(false);
+  useEffect(() => {
+    dropBusy.current = busy;
+  }, [busy]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let alive = true;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "enter" || p.type === "over") {
+          if (!dropBusy.current) setDragging(true);
+        } else if (p.type === "drop") {
+          setDragging(false);
+          const path = p.paths?.[0];
+          if (path && !dropBusy.current) void doOpen(path);
+        } else {
+          setDragging(false); // leave / cancel
+        }
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, [doOpen]);
 
   // The three widths change on every mouse-move of a drag, and a width is only
@@ -1525,6 +1565,11 @@ export default function App() {
 
   return (
     <div className="app">
+      {dragging && (
+        <div className="drop-overlay">
+          <div className="drop-hint">Drop a binary to open</div>
+        </div>
+      )}
       <div className="topbar">
         <span className="brand">
           <img className="brandmark" src={knifechan} alt="" draggable={false} />
@@ -2477,7 +2522,22 @@ export default function App() {
           })()}
           <div className="spacer" />
           <span className="sb-keys">
-            ctrl+p open   ctrl+` console   g goto   / filter   . / , findings   y/Y copy   m mark   h data   ? keys   d pseudo   f graph   s pane   x xrefs   n name   c note   t type   e field   l var   p proto   P patch
+            {(
+              [
+                ["ctrl+p", "open"],
+                ["g", "goto"],
+                ["/", "filter"],
+                ["d", "pseudo"],
+                ["f", "graph"],
+                ["x", "xrefs"],
+                ["?", "all keys"],
+              ] as const
+            ).map(([k, label]) => (
+              <span className="sb-key" key={k}>
+                <kbd>{k}</kbd>
+                {label}
+              </span>
+            ))}
           </span>
         </div>
       )}

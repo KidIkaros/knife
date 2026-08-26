@@ -9,9 +9,36 @@ import {
   type Suggestion,
 } from "../api";
 import { Markdown } from "./Markdown";
-import knifechan from "../assets/knifechan.png";
 
 export type AgentDock = "bottom" | "left" | "right";
+
+/// A framed panel with the docked edge filled, so the button reads as "the
+/// agent sits on the left / bottom / right" rather than the bar glyphs it used
+/// to show, which said nothing.
+function DockIcon({ side }: { side: AgentDock }) {
+  // The filled sliver inside a 14×14 frame, per side.
+  const fill =
+    side === "left"
+      ? { x: 2.5, y: 2.5, width: 4, height: 9 }
+      : side === "right"
+        ? { x: 7.5, y: 2.5, width: 4, height: 9 }
+        : { x: 2.5, y: 8, width: 9, height: 3.5 };
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <rect
+        x="1.5"
+        y="1.5"
+        width="11"
+        height="11"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <rect {...fill} rx="0.5" fill="currentColor" />
+    </svg>
+  );
+}
 
 interface Turn {
   question: string;
@@ -433,19 +460,20 @@ export function AgentPane({
   return (
     <div className={`agent dock-${dock}`}>
       <div className="panel-head">
-        <img className="agent-avatar" src={knifechan} alt="" draggable={false} />
         <span>agent</span>
         {isDriver && <span className="agent-mode">LPE hunt</span>}
         <div className="spacer" />
-        <span className="dock-controls" title="Dock position">
+        <span className="dock-controls" title="Dock the agent pane">
           {(["left", "bottom", "right"] as AgentDock[]).map((d) => (
             <button
               key={d}
               className={"dockbtn" + (dock === d ? " on" : "")}
               title={`dock ${d}`}
+              aria-label={`dock ${d}`}
+              aria-pressed={dock === d}
               onClick={() => onDock(d)}
             >
-              {d === "left" ? "▏" : d === "right" ? "▕" : "▁"}
+              <DockIcon side={d} />
             </button>
           ))}
         </span>

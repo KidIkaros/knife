@@ -1507,10 +1507,30 @@ button.act:disabled {
   color: var(--faint);
 }
 
+/* The essential keys, as chips. The full list lives in the ? overlay, so this
+   stays short enough never to truncate at the 960px minimum window width. */
 .statusbar .sb-keys {
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.statusbar .sb-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.statusbar .sb-keys kbd {
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
 }
 
 /* ── command console ──────────────────────────────────────────────────── */
@@ -2721,12 +2741,14 @@ button.act:disabled {
 }
 
 .dockbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 1px solid var(--border);
   color: var(--faint);
-  width: 20px;
-  height: 18px;
-  font-size: 11px;
+  width: 22px;
+  height: 20px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
@@ -2747,8 +2769,13 @@ button.act:disabled {
 }
 
 .dockbtn.on {
-  color: var(--accent);
+  color: var(--canvas);
+  background: var(--accent);
   border-color: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.dockbtn.on:hover {
+  color: var(--canvas);
 }
 
 /* ── top-bar panel toggle ─────────────────────────────────────────────── */
@@ -3216,16 +3243,6 @@ button.act:disabled {
   filter: drop-shadow(0 0 5px var(--accent-glow));
 }
 
-.agent-avatar {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  object-fit: cover;
-  object-position: center 32%;
-  border: 1px solid var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
-  flex: 0 0 20px;
-}
 
 /* a touch of glow on the brighter accents */
 .brand {
@@ -3460,4 +3477,28 @@ button.act:disabled {
 .xref-toggle:hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* ── drag a binary onto the window to open it ─────────────────────────── */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #060608cc;
+  backdrop-filter: blur(2px);
+  border: 2px dashed var(--accent);
+  pointer-events: none;
+}
+.drop-hint {
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 22px;
+  box-shadow: 0 0 18px var(--accent-glow);
 }
