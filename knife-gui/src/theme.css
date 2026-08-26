@@ -838,6 +838,14 @@ button.act:disabled {
   min-width: 92px;
 }
 
+/* The segment-prefixed gutter (linear view) is wider and fixed, so `.text:…`
+   addresses line up and the mnemonic column starts at the same place down the
+   whole sweep. The per-function and pseudocode gutters keep the narrow width. */
+.code .gutter.seg {
+  min-width: 210px;
+  color: var(--syn-sym);
+}
+
 .code .mnem {
   color: var(--syn-mnem);
   min-width: 56px;
@@ -859,6 +867,48 @@ button.act:disabled {
 
 .code .label {
   color: var(--amber);
+}
+
+/* A section header in the linear view: a band, not a dashed line. The left bar
+   is the accent for executable segments and muted for data, so code reads at a
+   glance; the metadata sits quietly to the right. */
+.code .section-band {
+  gap: 0;
+  margin: 6px 0 2px;
+  padding: 3px 12px 3px 9px;
+  background: var(--panel-2);
+  border-left: 3px solid var(--faint);
+  align-items: baseline;
+  justify-content: space-between;
+}
+.code .section-band.is-code {
+  border-left-color: var(--accent);
+}
+.code .section-band .sb-name {
+  color: var(--text);
+  font-weight: 600;
+}
+.code .section-band .sb-meta {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* A function header in the linear view, so one routine is told from the next. */
+.code .sub-banner {
+  gap: 10px;
+  margin-top: 8px;
+  padding: 2px 12px;
+  border-top: 1px solid var(--border);
+  align-items: baseline;
+  cursor: default;
+}
+.code .sub-banner .sub-name {
+  color: var(--syn-sym);
+  font-weight: 600;
+}
+.code .sub-banner .sub-meta {
+  color: var(--faint);
+  font-size: 11px;
 }
 
 .code .annot {

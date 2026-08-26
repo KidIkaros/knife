@@ -286,8 +286,25 @@ struct Region {
     start: u64,
     end: u64,
     name: String,
+    /// Short segment tag for the gutter (`.text`, `HEADER`, `overlay`).
+    seg: String,
+    /// `R-X` / `RW-` etc. for a real section; `None` for the container's own
+    /// headers, alignment padding, and a trailing overlay, none of which are
+    /// mapped with permissions.
+    perms: Option<String>,
     /// Whether the bytes here are meant to be executed.
     code: bool,
+}
+
+/// A section's permissions as the three-slot `rwx` string a disassembler shows.
+fn perms(sec: &reknife::model::Section) -> String {
+    let bit = |on: bool, c: char| if on { c } else { '-' };
+    format!(
+        "{}{}{}",
+        bit(sec.read, 'R'),
+        bit(sec.write, 'W'),
+        bit(sec.exec, 'X')
+    )
 }
 
 /// Cut the file into regions, in file order and covering all of it.
@@ -306,10 +323,11 @@ fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
     let mut at = 0u64;
     for s in &secs {
         if s.file_off > at {
+            let headers = at == 0;
             out.push(Region {
                 start: at,
                 end: s.file_off,
-                name: if at == 0 {
+                name: if headers {
                     match bin.format {
                         reknife::model::Format::Pe => "DOS header, stub, and PE headers".into(),
                         _ => "container headers".into(),
@@ -317,6 +335,12 @@ fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
                 } else {
                     "alignment padding".into()
                 },
+                seg: if headers {
+                    "HEADER".into()
+                } else {
+                    "align".into()
+                },
+                perms: None,
                 code: false,
             });
         }
@@ -326,6 +350,8 @@ fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
                 start: s.file_off,
                 end,
                 name: s.name.clone(),
+                seg: s.name.clone(),
+                perms: Some(perms(s)),
                 code: s.exec,
             });
         }
@@ -336,6 +362,8 @@ fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
             start: at,
             end: bin.size,
             name: "overlay".into(),
+            seg: "overlay".into(),
+            perms: None,
             code: false,
         });
     }
@@ -344,6 +372,8 @@ fn regions(bin: &reknife::model::Binary) -> Vec<Region> {
             start: 0,
             end: bin.size,
             name: "file".into(),
+            seg: "file".into(),
+            perms: None,
             code: false,
         });
     }
@@ -417,13 +447,13 @@ pub fn disassemble_linear(
                 // whether they are looking at code, at a table, or at bytes
                 // appended after the image.
                 if cursor == r.start || out.is_empty() {
-                    out.push(LineDto::Label {
+                    out.push(LineDto::Section {
                         addr: hex(cursor),
-                        text: format!(
-                            "── {} · {} ──",
-                            r.name,
-                            if r.code { "code" } else { "data" }
-                        ),
+                        name: r.name.clone(),
+                        code: if r.code { "code" } else { "data" },
+                        perms: r.perms.clone(),
+                        range: format!("0x{:x}–0x{:x}", r.start, r.end),
+                        size: reknife::output::human(r.end - r.start),
                     });
                 }
 
@@ -453,9 +483,15 @@ pub fn disassemble_linear(
                         // routine cannot be told from the next.
                         if let Some(f) = an.find_function(i.addr) {
                             if f.addr == i.addr && Some(cursor) != entry_off {
-                                out.push(LineDto::Label {
+                                let blocks = f.blocks.len();
+                                out.push(LineDto::Sub {
                                     addr: hex(i.addr),
-                                    text: format!("{}:", f.name),
+                                    name: f.name.clone(),
+                                    meta: format!(
+                                        "{blocks} block{} · {}",
+                                        if blocks == 1 { "" } else { "s" },
+                                        reknife::output::human(f.size),
+                                    ),
                                 });
                             }
                         }
@@ -479,6 +515,7 @@ pub fn disassemble_linear(
                             operands,
                             annot,
                             target: target.map(hex),
+                            seg: Some(r.seg.clone()),
                         });
                         cursor += ilen;
                     }
@@ -506,6 +543,7 @@ pub fn disassemble_linear(
                         out.push(LineDto::Data {
                             addr: hex(engine::off_to_va(bin, l.base, cursor).unwrap_or(cursor)),
                             text: format!("{hexs:<48} {ascii}"),
+                            seg: Some(r.seg.clone()),
                         });
                         cursor = end;
                     }
@@ -822,6 +860,7 @@ pub fn cfg(state: State<AppState>, selector: String) -> Result<CfgDto, String> {
                                     operands,
                                     annot: None,
                                     target: None,
+                                    seg: None,
                                 }
                             })
                         })
@@ -912,6 +951,7 @@ pub fn call_graph(
                     insns: vec![LineDto::Data {
                         addr: hex(n.address),
                         text: n.label.clone(),
+                        seg: None,
                     }],
                     count: by_addr.get(&n.address).map(|x| x.blocks.len()).unwrap_or(0),
                     bytes: by_addr.get(&n.address).map(|x| x.size).unwrap_or(0),

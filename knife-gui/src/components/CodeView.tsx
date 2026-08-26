@@ -101,6 +101,24 @@ export const CodeView = forwardRef<
   const hitClass = (i: number) =>
     hitSet.has(i) ? (currentHit === i ? " hit cur" : " hit") : "";
 
+  // The linear view prefixes each address with its segment and pads it to the
+  // pointer width, the way a disassembler does: `.text:0000000140001000`. The
+  // width is whatever the widest address in the window needs — 16 hex digits
+  // once any address runs past 32 bits, 8 otherwise — computed once here rather
+  // than per row. Lines without a segment (the function and pseudocode views)
+  // keep the bare address they always showed.
+  const padWidth = useMemo(() => {
+    for (const l of lines) {
+      const a = (l as { addr?: string }).addr;
+      if (a && a.replace(/^0x/, "").replace(/^0+/, "").length > 8) return 16;
+    }
+    return 8;
+  }, [lines]);
+  const gutterAddr = (addr: string, seg?: string) => {
+    const bare = addr.replace(/^0x/, "");
+    return seg ? `${seg}:${bare.padStart(padWidth, "0")}` : bare;
+  };
+
   const row = (i: number) => {
     if (tab === "pseudo") {
       const l = ir[i];
@@ -135,10 +153,29 @@ export const CodeView = forwardRef<
         </div>
       );
     }
+    if (l.kind === "section") {
+      return (
+        <div className={"ln section-band " + (l.code === "code" ? "is-code" : "is-data")}>
+          <span className="sb-name">{l.name}</span>
+          <span className="sb-meta">
+            {l.code}
+            {l.perms ? ` · ${l.perms}` : ""} · {l.range} · {l.size}
+          </span>
+        </div>
+      );
+    }
+    if (l.kind === "sub") {
+      return (
+        <div className="ln sub-banner" onClick={() => onSelect(l.addr)}>
+          <span className="sub-name">{l.name}</span>
+          <span className="sub-meta">{l.meta}</span>
+        </div>
+      );
+    }
     if (l.kind === "data") {
       return (
         <div className={"ln" + hitClass(i)}>
-          <span className="gutter">{l.addr.replace("0x", "")}</span>
+          <span className={"gutter" + (l.seg ? " seg" : "")}>{gutterAddr(l.addr, l.seg)}</span>
           <span className="ops">{l.text}</span>
         </div>
       );
@@ -159,7 +196,7 @@ export const CodeView = forwardRef<
         onClick={() => onSelect(l.addr)}
         onDoubleClick={() => l.target && onFollow(l.target)}
       >
-        <span className="gutter">
+        <span className={"gutter" + (l.seg ? " seg" : "")}>
           {flow && (
             <i
               className="flowmark"
@@ -172,7 +209,7 @@ export const CodeView = forwardRef<
               {flow === "sink" ? "▼" : "│"}
             </i>
           )}
-          {l.addr.replace("0x", "")}
+          {gutterAddr(l.addr, l.seg)}
         </span>
         <span className="mnem">{l.mnemonic}</span>
         {l.target ? (

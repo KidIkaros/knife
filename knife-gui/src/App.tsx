@@ -86,6 +86,9 @@ function listingToText(tab: Tab, lines: Line[], ir: IrLine[]): string {
   return lines
     .map((l) => {
       if (l.kind === "label") return l.text;
+      if (l.kind === "section")
+        return `; ${l.name}  (${l.code}${l.perms ? ` ${l.perms}` : ""})  ${l.range}  ${l.size}`;
+      if (l.kind === "sub") return `${l.name}:  ; ${l.meta}`;
       if (l.kind === "data") return `${l.addr}  ${l.text}`;
       const body = l.operands ? `${l.mnemonic.padEnd(7)} ${l.operands}` : l.mnemonic;
       return `${l.addr}  ${body}${l.annot ? `  ; ${l.annot.text}` : ""}`;
@@ -461,7 +464,13 @@ export default function App() {
       // view is actually showing — the sweep is its own listing.
       (tab === "linear" ? linear : lines).forEach((l, i) => {
         const text =
-          l.kind === "insn" ? `${l.addr} ${l.mnemonic} ${l.operands} ${l.annot?.text ?? ""}` : l.text;
+          l.kind === "insn"
+            ? `${l.addr} ${l.mnemonic} ${l.operands} ${l.annot?.text ?? ""}`
+            : l.kind === "section"
+              ? `${l.name} ${l.range}`
+              : l.kind === "sub"
+                ? `${l.name} ${l.meta}`
+                : l.text;
         if (text.toLowerCase().includes(q)) out.push(i);
       });
     }

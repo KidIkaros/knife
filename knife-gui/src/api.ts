@@ -31,14 +31,25 @@ export interface Annot {
 export type Line =
   | { kind: "label"; addr: string; text: string }
   | {
+      kind: "section";
+      addr: string;
+      name: string;
+      code: "code" | "data";
+      perms?: string;
+      range: string;
+      size: string;
+    }
+  | { kind: "sub"; addr: string; name: string; meta: string }
+  | {
       kind: "insn";
       addr: string;
       mnemonic: string;
       operands: string;
       annot: Annot | null;
       target: string | null;
+      seg?: string;
     }
-  | { kind: "data"; addr: string; text: string };
+  | { kind: "data"; addr: string; text: string; seg?: string };
 
 export interface IrLine {
   label: boolean;

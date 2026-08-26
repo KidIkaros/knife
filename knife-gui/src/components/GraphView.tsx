@@ -75,7 +75,9 @@ function lineText(l: CfgNode["insns"][number]): string {
     const annot = l.annot ? `  ; ${l.annot.text}` : "";
     return `${l.mnemonic.padEnd(7)} ${l.operands}${annot}`;
   }
-  return l.text;
+  // A CFG node only ever holds label/insn/data lines; section and sub banners
+  // are the linear view's alone. Reading `name` off them keeps the type honest.
+  return "text" in l ? l.text : l.name;
 }
 
 function cardHeight(n: CfgNode) {
@@ -616,7 +618,7 @@ export function GraphView({
                 if (l.kind !== "insn") {
                   return (
                     <text key={i} className="bline" x={PAD_X} y={y}>
-                      {l.text}
+                      {"text" in l ? l.text : l.name}
                     </text>
                   );
                 }

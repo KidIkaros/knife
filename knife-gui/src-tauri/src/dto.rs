@@ -85,16 +85,43 @@ pub enum LineDto {
         addr: String,
         text: String,
     },
+    /// A section header band in the linear view: segment name, whether it holds
+    /// code or data, its permissions (absent for the container's own headers and
+    /// for padding), its address range, and its size.
+    Section {
+        addr: String,
+        name: String,
+        /// "code" or "data" — named `code` because the enum's own tag is `kind`.
+        code: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        perms: Option<String>,
+        range: String,
+        size: String,
+    },
+    /// A function header band in the linear view, so one routine is told from
+    /// the next instead of running together into a wall.
+    Sub {
+        addr: String,
+        name: String,
+        meta: String,
+    },
     Insn {
         addr: String,
         mnemonic: String,
         operands: String,
         annot: Option<AnnotDto>,
         target: Option<String>,
+        /// The segment this row falls in, for the `.text:…`-style gutter. Only
+        /// the linear sweep sets it; a per-function listing leaves it `None` and
+        /// its gutter is unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seg: Option<String>,
     },
     Data {
         addr: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seg: Option<String>,
     },
 }
 
@@ -117,10 +144,14 @@ impl From<&Line> for LineDto {
                 operands: operands.clone(),
                 annot: annot.as_ref().map(AnnotDto::from),
                 target: target.map(hex),
+                // A per-function listing has no segment gutter; only the linear
+                // sweep sets this, and it builds its rows directly.
+                seg: None,
             },
             Line::Data { addr, text } => LineDto::Data {
                 addr: hex(*addr),
                 text: text.clone(),
+                seg: None,
             },
         }
     }
