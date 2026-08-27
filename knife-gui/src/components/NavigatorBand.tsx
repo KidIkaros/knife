@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Overview, OverviewBucket } from "../api";
 
 // The navigator band: a full-width, always-on overview of the entire image.
@@ -63,6 +63,20 @@ export function NavigatorBand({
 }) {
   const ref = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
+  // Press-and-drag scrubs the whole file: on a big image the native scrollbar
+  // paginates and its bottom keeps receding as more loads, so dragging the
+  // navigator is how you actually reach any point in the listing. Seeks are
+  // throttled — each one re-fetches a window — and the release always seeks the
+  // final position so the drag never ends somewhere it did not land.
+  const dragging = useRef(false);
+  const lastSeek = useRef(0);
+  useEffect(() => {
+    const up = () => {
+      dragging.current = false;
+    };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
   const vert = orientation === "vertical";
 
   // The shapes below are described in "along the file" and "across the strip"
@@ -127,6 +141,14 @@ export function NavigatorBand({
       if (b?.va) return onSeek(b.va);
     }
   };
+  // `force` on press and release; throttled while dragging so a scrub does not
+  // fire a fetch for every pixel of travel.
+  const scrub = (i: number, force: boolean) => {
+    const now = performance.now();
+    if (!force && now - lastSeek.current < 90) return;
+    lastSeek.current = now;
+    seek(i);
+  };
 
   const caretW = Math.max(1, n / 240);
   const hb = hover !== null ? buckets[hover] : null;
@@ -163,9 +185,16 @@ export function NavigatorBand({
         className="navband-track"
         viewBox={vert ? `0 0 100 ${n}` : `0 0 ${n} 100`}
         preserveAspectRatio="none"
-        onMouseMove={(e) => setHover(idxAt(e))}
+        onMouseDown={(e) => {
+          dragging.current = true;
+          scrub(idxAt(e), true);
+        }}
+        onMouseMove={(e) => {
+          setHover(idxAt(e));
+          if (dragging.current) scrub(idxAt(e), false);
+        }}
+        onMouseUp={(e) => scrub(idxAt(e), true)}
         onMouseLeave={() => setHover(null)}
-        onClick={(e) => seek(idxAt(e))}
       >
         {/* entropy body */}
         {buckets.map((b, i) => (

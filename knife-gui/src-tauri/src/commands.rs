@@ -69,7 +69,11 @@ pub fn open_target(
         .open(&path, &|p| {
             let _ = app.emit("knife://phase", p);
         })
-        .map_err(|e| e.to_string())?;
+        // `{:#}`, not `to_string()`: the reason a file would not open is the
+        // whole point of the message. A locked system file like `hiberfil.sys`
+        // fails deep in `std::fs::read`, and without the cause chain the user
+        // sees a bare "cannot read …" with no hint that it is in use.
+        .map_err(|e| format!("{e:#}"))?;
     state
         .read(|l| {
             let an = &l.session.an;

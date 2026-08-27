@@ -260,6 +260,9 @@ export default function App() {
   // failed sweep leaves the tab empty, which is the condition that asks for the
   // sweep, so a toast per attempt turns one bad anchor into a stack of them.
   const [linearError, setLinearError] = useState<string | null>(null);
+  // A ticket for linear seeks, so a slow reply during a navigator drag cannot
+  // land after a newer one (see seekLinear).
+  const seekSeq = useRef(0);
   // The two filter boxes below fetch straight from their input handler, where
   // there is no effect cleanup to hang a guard on. Each request takes a ticket
   // and only the newest one is allowed to write, so a slow reply for an earlier
@@ -558,19 +561,25 @@ export default function App() {
   /// Start the linear sweep somewhere: an address, or the entry point when the
   /// caller has nowhere particular in mind. Replaces whatever was there.
   const seekLinear = useCallback(async (opts?: { off?: number; at?: string }) => {
+    // Dragging the navigator fires many seeks in a row; a slow one must not land
+    // after a newer one and show the wrong window. Only the latest request gets
+    // to write the result.
+    const seq = ++seekSeq.current;
     setLinearBusy(true);
     setLinearError(null);
     try {
       const w = await api.disassembleLinear(opts?.off, opts?.at, 1500);
+      if (seq !== seekSeq.current) return;
       setLinear(w.lines);
       setLinearAt(opts?.at ?? null);
       setLinearNext(w.next);
     } catch (e) {
+      if (seq !== seekSeq.current) return;
       setLinear([]);
       setLinearNext(null);
       setLinearError(String(e).replace(/^Error:\s*/i, ""));
     } finally {
-      setLinearBusy(false);
+      if (seq === seekSeq.current) setLinearBusy(false);
     }
   }, []);
 
@@ -2486,12 +2495,19 @@ export default function App() {
                 collapse, because an overview you have to open is not one. */}
             <NavigatorBand
               overview={overview}
-              current={selected ?? current}
+              current={tab === "linear" ? (linearAt ?? selected ?? current) : (selected ?? current)}
               orientation="vertical"
               onSeek={(va) => {
-                // A click may land on code or on data; the disassembly tab
-                // renders both (a data view for a non-function address), so seek
-                // there and let openFunction resolve it.
+                // In the linear tab the band is the scrollbar for the whole
+                // file — dragging it seeks the sweep and stays put, which is
+                // how you reach any offset without paging through everything.
+                if (tab === "linear") {
+                  void seekLinear({ at: va });
+                  return;
+                }
+                // Elsewhere a click may land on code or on data; the disassembly
+                // tab renders both (a data view for a non-function address), so
+                // seek there and let openFunction resolve it.
                 setTab("disasm");
                 void openFunction(va);
               }}
