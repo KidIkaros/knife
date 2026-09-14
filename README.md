@@ -12,9 +12,62 @@ binary. Static only: it reads the bytes on disk and never runs the target.
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![platforms](https://img.shields.io/badge/platform-linux%20%C2%B7%20macos%20%C2%B7%20windows-informational)
 
-<img src="assets/demo.gif" width="990" alt="knife tui: functions, disassembly, pseudocode, CFG, and driver analysis">
+<img src="assets/demo.gif" width="990" alt="knife TUI: function navigation, strings, sections, imports, and history">
+
+[Watch the MP4 demo](assets/demo.mp4)
 
 </div>
+
+## Active development direction
+
+Knife is a terminal-first reverse-engineering toolkit. Its active product is the
+deterministic core analysis engine, CLI, TUI and MCP interface. The TUI is the
+primary interactive surface. Desktop GUI components are not part of the active
+build; the engine is shared by terminal and automation interfaces.
+
+```powershell
+cargo run --bin knife -- tui path\to\target.exe
+```
+
+In the TUI, `?` shows help and `:` opens command mode. Use `:function NAME`,
+`:goto 0xADDRESS`, `:disasm`, `:decompile`, `:cfg`, `:rename NAME`, and `:comment TEXT`.
+The interface uses a monochrome, square-bordered debugger theme. The active pane
+has a white title strip and `>` marker; Tab / Shift+Tab cycle visible panes in
+either direction. Compact footer hints keep command mode and help discoverable.
+Startup shows elapsed analysis time, not a guessed completion percentage. The
+workspace opens immediately when ready; there is no intro replay or idle spinner.
+Driver-report preparation runs on the startup worker with the other analysis.
+`:imports`, `:exports` and `:strings` open filterable catalogs; `/` filters and Enter
+opens the selected static address. Static VA and file offset are labeled separately.
+`:sections` browses section locations. `b` or `:bookmark` toggles a local bookmark;
+`:bookmarks` lists saved locations. Bookmarks live with names/comments in the existing
+hash-keyed annotation JSON and do not require a research database or model provider.
+Tab completes command names; Up/Down recalls commands. Backspace or Alt+Left returns;
+Alt+Right moves forward. Names take precedence over hexadecimal static addresses.
+`:next` and `:previous` open adjacent recovered functions in static-address order,
+without wrapping or changing the function filter. `:history` browses past/forward
+locations; `/` filters and Enter restores the saved view/cursor as a new navigation
+branch. Backspace returns from that jump.
+`:focus functions|listing|references` focuses/reveals a pane. `:close` closes the
+focused side pane; `:widen`/`:narrow` adjust its width. Tab skips closed side panes.
+Wide terminals show references beside the listing; narrower terminals put them
+below it. Pane settings currently last for the running session only.
+Disassembly and pseudocode retain separate cursor positions while switching and
+through back/forward history. CFG switching selects the block containing the last
+assembly position; switching back lands at the selected block's start. This does
+not imply instruction-level pseudocode correlation.
+`:xrefs` shows references to the cursor; `:callers` and `:callees` show the current
+function's recovered call sites. Tail-call jumps retain their jump classification;
+data operands and conditional branches are not promoted to calls. Empty results do
+not establish unreachability. The CLI uses the same call-site query:
+
+```powershell
+cargo run --bin knife -- callers target.exe --function SYMBOL
+cargo run --bin knife -- callees target.exe --function 0x140001000 --json
+```
+
+The [terminal milestone plan](docs/terminal-workstation-plan.md) defines the
+cleanup scope and the review boundary before TUI stabilization.
 
 Most tools tell you a binary imports `memcpy`. `knife` reads the call sites and
 tells you which one takes its length from a subtraction:
@@ -71,6 +124,29 @@ Or grab a prebuilt archive for Linux, macOS, or Windows from the
 on your `PATH`.
 
 ## Commands
+
+### ELF header inspection
+
+```bash
+knife headers ./target.elf                 # ELF file header, including raw e_ident[16]
+knife segments ./target.elf                # program headers and mapped section indices
+knife sections ./target.elf --details      # full section headers, including section zero
+knife headers ./target.elf --json          # raw values plus decoded labels
+```
+
+These commands use the core's Goblin-backed header inspector, without function
+recovery. ELF32/ELF64, both byte orders and extended header numbering are supported.
+Raw flags and unknown numeric values remain visible. Segment section indices show
+allocated sections contained in both memory and (except NOBITS) file ranges;
+this is static containment, not proof of runtime loader behavior. Header-specific
+TUI/MCP views are not implemented yet; the existing sections summary is unchanged.
+
+The README animation renders real TUI actions off-screen; it is not a live-terminal
+performance measurement and does not demonstrate the new CLI-only header views.
+On Windows, regenerate the GIF and MP4 with
+`./scripts/record-demo.ps1 -Target 'C:/Program Files/7-Zip/7z.dll'`.
+This requires Cargo, Python (`py`) with Pillow, and FFmpeg; nothing is installed
+automatically. Different target versions can produce different navigation results.
 
 One tool, many jobs, which is the point of a Swiss-army knife:
 
@@ -362,8 +438,7 @@ host's own `ntoskrnl.exe` / `ndis.sys` export directories by
 structure layouts (`DRIVER_OBJECT`, `IRP`, `IO_STACK_LOCATION`,
 `UNICODE_STRING`) live in `ktypes.rs`, awaiting the IR type-renaming pass;
 the palatable parts (dispatch-slot IRP names, IOCTL `Parameters` offsets) are
-already in use. `scripts/knife-ai.mjs` runs the `drv` pass and asks the model
-for a driver-specific BYOVD section. The loldrivers snapshot is rebuilt with
+already in use. The loldrivers snapshot is rebuilt with
 `scripts/gen-loldrivers.mjs` from the project's public API.
 
 ## What makes it more than objdump

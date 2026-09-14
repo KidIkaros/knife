@@ -14,17 +14,11 @@ documentation = "https://docs.rs/reknife"
 readme = "README.md"
 keywords = ["reverse-engineering", "disassembler", "malware", "security", "pe"]
 categories = ["command-line-utilities", "development-tools::debugging"]
-exclude = ["assets/", ".github/", "scripts/", "*.png", "knife-gui/"]
+exclude = ["assets/", ".github/", "scripts/", "*.png"]
 
-# ── workspace ───────────────────────────────────────────────────────────────
-# The desktop GUI (`knife-gui`) is a separate workspace member so its Tauri/web
-# dependency graph never enters the `knife` binary or the published `reknife`
-# crate — the exact concern that got the previous in-crate GUI reverted.
-# `default-members = ["."]` keeps `cargo build`/`test`/`clippy` at the repo root
-# scoped to reknife alone; the GUI is built explicitly with `-p knife-gui` or the
-# Tauri CLI. reknife's own dependencies below are unchanged.
+# Core, CLI, TUI and MCP share this package; no desktop workspace members.
 [workspace]
-members = ["knife-gui/src-tauri"]
+members = ["."]
 default-members = ["."]
 resolver = "2"
 
@@ -73,10 +67,7 @@ cpp_demangle = "0.5.1"
 msvc-demangler = "0.11.0"
 rustc-demangle = "0.1.28"
 
-# Debug builds carry full symbols for every dependency, and with the GUI in the
-# workspace that is several hundred crates. Line tables are enough to get a
-# useful backtrace out of our own code; the dependencies need none at all. This
-# is the difference between a 40 GB target directory and a manageable one.
+# Keep useful line tables for our code without full dependency debug symbols.
 [profile.dev]
 debug = 1
 

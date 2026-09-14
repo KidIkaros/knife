@@ -1,7 +1,6 @@
 //! Drawing. Reads `App` and never changes it.
 //!
-//! The palette is the same one the printed output uses, so the interactive view
-//! and the reports look like the same tool.
+//! Monochrome debugger palette: hierarchy and focus, not decorative syntax hues.
 
 use super::{
     graph_horizontal_offset, graph_layout, graph_view_offset, App, Focus, LeftView, Line, RefView,
@@ -9,7 +8,7 @@ use super::{
 };
 use crate::listing::Annot;
 use iced_x86::FlowControl;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TLine, Span};
 use ratatui::widgets::{
@@ -18,46 +17,47 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 fn accent() -> Color {
-    Color::Rgb(0x5c, 0xc8, 0xd7)
+    Color::Rgb(0xf0, 0xf0, 0xf0)
 }
 fn critical() -> Color {
-    Color::Rgb(0xf0, 0x64, 0x64)
+    Color::Rgb(0xff, 0xff, 0xff)
 }
 fn muted() -> Color {
-    Color::Rgb(0xa6, 0xad, 0xbb)
+    Color::Rgb(0xc0, 0xc0, 0xc0)
 }
 fn faint() -> Color {
-    Color::Rgb(0x59, 0x62, 0x73)
+    Color::Rgb(0x88, 0x88, 0x88)
 }
 fn mint() -> Color {
-    Color::Rgb(0x79, 0xc9, 0x9e)
+    Color::Rgb(0xd8, 0xd8, 0xd8)
 }
 fn amber() -> Color {
-    Color::Rgb(0xe3, 0xb3, 0x41)
+    Color::Rgb(0xe0, 0xe0, 0xe0)
 }
 fn canvas() -> Color {
-    Color::Rgb(0x0b, 0x10, 0x16)
+    Color::Rgb(0x00, 0x00, 0x00)
 }
 fn panel() -> Color {
-    Color::Rgb(0x11, 0x19, 0x23)
+    Color::Rgb(0x12, 0x12, 0x12)
 }
 fn selected() -> Style {
     Style::default()
-        .fg(Color::Rgb(0xe7, 0xec, 0xf2))
-        .bg(Color::Rgb(0x1d, 0x2b, 0x36))
+        .fg(Color::Rgb(0xff, 0xff, 0xff))
+        .bg(Color::Rgb(0x38, 0x38, 0x38))
         .add_modifier(Modifier::BOLD)
 }
 
 fn pane(title: &str, focused: bool) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(Style::default().bg(panel()))
+        .border_type(BorderType::Plain)
+        .style(Style::default().fg(muted()).bg(panel()))
         .border_style(Style::default().fg(if focused { accent() } else { faint() }))
         .title(Span::styled(
-            format!(" {title} "),
+            format!("{} {title} ", if focused { ">" } else { " " }),
             Style::default()
-                .fg(if focused { accent() } else { faint() })
+                .fg(if focused { canvas() } else { muted() })
+                .bg(if focused { accent() } else { panel() })
                 .add_modifier(if focused {
                     Modifier::BOLD
                 } else {
@@ -74,15 +74,16 @@ const FIXED_FUNCTION_COLUMNS: usize = 15;
 /// address. Whatever the pane has left over is split between the two names.
 const FIXED_SINK_COLUMNS: usize = 14;
 
-/// How many columns the left pane gets.
-///
-/// A fixed 38 is the right answer at 80 columns and a waste at 160: the sink
-/// rows are the widest thing that pane draws, and at 38 the containing function
-/// is always cut short. Grow with the terminal, but never far enough to crowd
-/// the listing, which is what the extra width is for in the first place.
-fn left_width(total: u16) -> u16 {
-    let want = (total * 2 / 5).clamp(38, 52);
-    want.min(total.saturating_sub(24)).max(20)
+pub fn loading(f: &mut Frame, title: &str, elapsed_seconds: u64) {
+    let title: String = title
+        .chars()
+        .map(|ch| if ch.is_control() { '.' } else { ch })
+        .collect();
+    let text = format!("KNIFE | {title}\n\nRecovering functions and preparing analysis views...\nElapsed: {elapsed_seconds}s | progress total unavailable\n\nq / Esc / Ctrl+C: quit");
+    f.render_widget(
+        Paragraph::new(text).style(Style::default().fg(muted()).bg(canvas())),
+        f.area(),
+    );
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -91,71 +92,27 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
     f.render_widget(
-        Block::default().style(Style::default().bg(canvas())),
+        Block::default().style(Style::default().fg(muted()).bg(canvas())),
         f.area(),
     );
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(5),    // body
-            Constraint::Length(1), // prompt / hints
-        ])
-        .split(f.area());
-
-    header(f, rows[0], app);
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(left_width(rows[1].width)),
-            Constraint::Min(20),
-        ])
-        .split(rows[1]);
-
-    functions(f, cols[0], app);
-
-    // The right pane hosts different layouts depending on the left view, and
-    // the listing swaps between linear and spatial graph rendering. ratatui
-    // keeps untouched cells from the previous frame, so clear the pane first
-    // or box-drawing from a larger previous frame would linger behind it.
-    f.render_widget(Clear, cols[1]);
-
-    if app.left == LeftView::Sinks && !app.sinks.is_empty() {
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(6),
-                Constraint::Length(7),
-            ])
-            .split(cols[1]);
-        listing(f, right[0], app);
-        evidence(f, right[1], app);
-        xrefs(f, right[2], app);
-    } else if app.left == LeftView::Types {
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(7),
-                Constraint::Length(7),
-            ])
-            .split(cols[1]);
-        listing(f, right[0], app);
-        type_detail(f, right[1], app);
-        xrefs(f, right[2], app);
-    } else {
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(8)])
-            .split(cols[1]);
-        listing(f, right[0], app);
-        xrefs(f, right[1], app);
+    let panes = app.panes(f.area());
+    header(f, panes.header, app);
+    if panes.functions.width > 0 {
+        functions(f, panes.functions, app);
     }
-
-    footer(f, rows[2], app);
+    listing(f, panes.listing, app);
+    if panes.detail.height > 0 {
+        if app.left == LeftView::Types {
+            type_detail(f, panes.detail, app);
+        } else {
+            evidence(f, panes.detail, app);
+        }
+    }
+    if panes.references.width > 0 && panes.references.height > 0 {
+        xrefs(f, panes.references, app);
+    }
+    footer(f, panes.footer, app);
 
     if app.help {
         help(f, f.area());
@@ -169,13 +126,9 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .filter(|finding| finding.severity >= 3)
         .count();
-    // A tiny blade spinner, driven by the same frame counter as the splash.
-    // Every second frame: ~300ms per step at the idle tick rate, ~66ms during
-    // the splash.
-    let spin = ["-", "\\", "|", "/"][(app.frame / 2) as usize % 4];
     let line = TLine::from(vec![
         Span::styled(
-            format!(" ╱{spin} KNIFE  {} ", app.title),
+            format!(" KNIFE  {} ", app.title),
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -194,6 +147,10 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn functions(f: &mut Frame, area: Rect, app: &App) {
+    if let Some(browser) = &app.browser {
+        catalog(f, area, app, browser);
+        return;
+    }
     if app.left == LeftView::Sinks {
         sinks(f, area, app);
         return;
@@ -262,6 +219,66 @@ fn functions(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The attack surface: ranked sink call sites, most severe first.
+fn catalog(f: &mut Frame, area: Rect, app: &App, browser: &super::browser::Browser) {
+    let height = usize::from(area.height.saturating_sub(2))
+        .div_ceil(2)
+        .max(1);
+    let start = browser
+        .selection
+        .saturating_sub(height / 2)
+        .min(browser.visible.len().saturating_sub(height));
+    let items: Vec<ListItem> = browser
+        .visible
+        .iter()
+        .skip(start)
+        .take(height)
+        .map(|index| {
+            let row = &browser.rows[*index];
+            let address = row
+                .address
+                .map(|value| format!("VA {:x}", value.get()))
+                .unwrap_or_else(|| "VA unresolved".into());
+            let offset = row
+                .file_offset
+                .map(|value| format!(" OFF {:x}", value.get()))
+                .unwrap_or_default();
+            let label: String = row
+                .label
+                .chars()
+                .map(|ch| if ch.is_control() { '.' } else { ch })
+                .collect();
+            ListItem::new(vec![
+                TLine::from(Span::styled(
+                    truncate(&label, usize::from(area.width.saturating_sub(3))),
+                    Style::default().fg(mint()),
+                )),
+                TLine::from(Span::styled(
+                    format!("{address}{offset} {}", row.detail),
+                    Style::default().fg(muted()),
+                )),
+            ])
+        })
+        .collect();
+    let title = format!(
+        "{} {} /{}",
+        browser.catalog.title(),
+        browser.visible.len(),
+        browser.filter
+    );
+    let mut state = ListState::default();
+    if !browser.visible.is_empty() {
+        state.select(Some(browser.selection - start));
+    }
+    f.render_stateful_widget(
+        List::new(items)
+            .block(pane(&title, app.focus == Focus::Functions))
+            .highlight_style(selected())
+            .highlight_symbol(">"),
+        area,
+        &mut state,
+    );
+}
+
 fn sinks(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Functions;
     // Split the row across the pane it is actually being drawn into: two
@@ -1044,6 +1061,10 @@ fn xrefs(f: &mut Frame, area: Rect, app: &App) {
             app.xref_at() + app.an.display_base,
             rows.len()
         ),
+        RefView::Callers => {
+            let name = app.cur.map(|a| app.an.label(a)).unwrap_or_default();
+            format!("callers of {name} ({})", rows.len())
+        }
         RefView::From => {
             let name = app.cur.map(|a| app.an.label(a)).unwrap_or_default();
             format!("calls from {name} ({})", rows.len())
@@ -1051,9 +1072,9 @@ fn xrefs(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let empty = if app.refview == RefView::To {
-        " no references"
+        " no recovered references; indirect reachability unknown"
     } else {
-        " no calls"
+        " no recovered calls; unresolved indirect calls may exist"
     };
     let items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(TLine::from(Span::styled(
@@ -1100,11 +1121,16 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if let Some(p) = &app.prompt {
         let line = TLine::from(vec![
             Span::styled(
-                format!(" {}: ", p.ask.label()),
+                if p.ask == super::Ask::Command {
+                    " : ".into()
+                } else {
+                    format!(" {}: ", p.ask.label())
+                },
                 Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(p.input.clone()),
             Span::styled("█", Style::default().fg(accent())),
+            Span::styled(format!("  {}", app.status), Style::default().fg(muted())),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -1123,51 +1149,66 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
     f.render_widget(
         Paragraph::new(TLine::from(Span::styled(
-            format!(
-                " db {} · ↵ open/follow{jump} ⌫ back   {find}   g goto   s {left}   x {refs}   d {mode}   f {graph}{types}   n name   c note   ? help   q quit",
-                app.db.len(),
-                jump = if app.focus == Focus::Xrefs {
-                    " (jump to ref)"
-                } else {
-                    ""
-                },
-                find = if app.focus == Focus::Listing { "/ search" } else { "/ filter" },
-                left = match app.left {
-                    LeftView::Functions => "sinks",
-                    LeftView::Sinks => "driver",
-                    LeftView::Driver => "types",
-                    LeftView::Types => "funcs",
-                },
-                refs = if app.refview == RefView::To { "callees" } else { "callers" },
-                mode = if app.pseudo { "asm" } else { "pseudo" },
-                graph = if app.graph { "asm" } else { "graph" },
-                types = if app.focus == Focus::Functions && app.left == LeftView::Types {
-                    "   I import   R replace   E export"
-                } else if app.pseudo {
-                    "   l var   t type   e field   p proto"
-                } else if app.focus == Focus::Listing && !app.graph {
-                    "   P patch"
-                } else {
-                    ""
-                },
-            ),
-            Style::default().fg(faint()),
+            footer_hints(app.focus, area.width),
+            Style::default().fg(muted()),
         ))),
         area,
     );
 }
 
+fn footer_hints(focus: Focus, width: u16) -> String {
+    let name = match focus {
+        Focus::Functions => "Browser",
+        Focus::Listing => "Listing",
+        Focus::Xrefs => "References",
+    };
+    let mut hints = format!(" {name} | : commands | ? help");
+    let find = match focus {
+        Focus::Listing => " | / search",
+        Focus::Functions => " | / filter",
+        Focus::Xrefs => "",
+    };
+    let enter = match focus {
+        Focus::Functions => " | Enter open",
+        Focus::Listing => " | Enter follow",
+        Focus::Xrefs => " | Enter jump",
+    };
+    for hint in [
+        " | Tab/S-Tab panes",
+        enter,
+        " | Backspace back",
+        " | g goto",
+        find,
+        " | q quit",
+    ] {
+        if hints.len() + hint.len() <= usize::from(width) {
+            hints.push_str(hint);
+        }
+    }
+    hints
+}
+
 fn help(f: &mut Frame, area: Rect) {
     let text = vec![
         "",
-        "  ↑ ↓ / j k      move            tab            switch pane",
+        "  ↑ ↓ / j k      move            Tab/Shift+Tab  next/previous pane",
         "                  (functions / listing / xrefs)",
         "  pgup pgdn      page            home end       first / last",
         "  mouse          wheel scrolls, click picks a pane and an entry",
         "  ↵              open a function, follow the call under the cursor,",
         "                 or jump to a reference in the xrefs pane; following a",
         "                 string operand opens its bytes as a hex dump",
-        "  ⌫              back to where you followed from",
+        "  Backspace      back to where you followed from",
+        "  Alt+Left/Right back/forward, restoring view and cursor",
+        "  :next/previous adjacent function in static-address order (no wrapping)",
+        "  :history       browse/filter saved past and forward view locations",
+        "  :focus PANE    functions, listing, references (reveals closed pane)",
+        "  :close         close focused side pane; :widen/:narrow adjust width",
+        "  :              command mode; Tab completes, Up/Down recalls commands",
+        "                 functions, function NAME, goto VA, cfg, disasm, decompile",
+        "                 xrefs, callers, callees, types, rename NAME, comment TEXT, help",
+        "                 imports, exports, strings, sections; / filters catalog",
+        "  b              toggle local bookmark; :bookmarks lists saved locations",
         "",
         "  /              filter the function list, or search the code when the",
         "                 listing is focused (/↵ repeats, jumping to the next hit)",
@@ -1242,6 +1283,56 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monochrome_panes_have_square_borders_and_explicit_focus() {
+        use ratatui::{buffer::Buffer, widgets::Widget};
+        let area = Rect::new(0, 0, 24, 4);
+        let mut active = Buffer::empty(area);
+        pane("listing", true).render(area, &mut active);
+        assert_eq!(active[(0, 0)].symbol(), "┌");
+        assert_eq!(active[(1, 0)].symbol(), ">");
+        assert_eq!(active[(1, 0)].fg, canvas());
+        assert_eq!(active[(1, 0)].bg, accent());
+        assert_eq!(
+            active[(1, 1)].fg,
+            muted(),
+            "text must not inherit a light terminal's dark foreground"
+        );
+        let mut inactive = Buffer::empty(area);
+        pane("listing", false).render(area, &mut inactive);
+        assert_ne!(inactive[(1, 0)].bg, active[(1, 0)].bg);
+        for color in [
+            accent(),
+            critical(),
+            muted(),
+            faint(),
+            mint(),
+            amber(),
+            canvas(),
+            panel(),
+        ] {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("expected an explicit palette color")
+            };
+            assert_eq!(r, g);
+            assert_eq!(g, b);
+        }
+    }
+
+    #[test]
+    fn compact_footer_keeps_commands_and_help_visible() {
+        for focus in [Focus::Functions, Focus::Listing, Focus::Xrefs] {
+            for width in [40, 60, 80, 110, 160] {
+                let hints = footer_hints(focus, width);
+                assert!(hints.len() <= usize::from(width));
+                assert!(hints.contains(": commands"));
+                assert!(hints.contains("? help"));
+            }
+        }
+        assert!(footer_hints(Focus::Functions, 160).contains("/ filter"));
+        assert!(!footer_hints(Focus::Xrefs, 160).contains("/ search"));
+    }
 
     #[test]
     fn recovered_pseudocode_types_have_the_fact_color() {

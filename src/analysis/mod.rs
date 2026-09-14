@@ -16,6 +16,7 @@ pub mod ktypes;
 pub mod loldrivers;
 pub mod nt_ordinals;
 pub mod ntapi;
+pub mod reachability;
 pub mod signatures;
 pub mod signing;
 pub mod sinks;

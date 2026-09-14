@@ -1,0 +1,22 @@
+//! Presentation history retains the view that an address was inspected in.
+
+use super::{Focus, RefView};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewPositions {
+    pub disassembly: usize,
+    pub pseudocode: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationLocation {
+    pub address: u64,
+    pub cursor: usize,
+    pub positions: ViewPositions,
+    pub pseudo: bool,
+    pub graph: bool,
+    pub focus: Focus,
+    pub reference_view: RefView,
+    pub reference_cursor: usize,
+    pub reference_anchor: Option<u64>,
+}

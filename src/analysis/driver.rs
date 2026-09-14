@@ -35,11 +35,13 @@ pub struct LolHit {
 // CTL_CODE(DeviceType, Function, Method, Access):
 //   31..16 DeviceType, 15..14 Access, 13..2 Function, 1..0 Method
 fn decode_ctl(code: u32) -> (u32, u32, u32, u32) {
-    let device = (code >> 16) & 0xffff;
-    let access = (code >> 14) & 0x3;
-    let function = (code >> 2) & 0xfff;
-    let method = code & 0x3;
-    (device, function, method, access)
+    let decoded = crate::windows::decode_ctl_code(code);
+    (
+        decoded.device_type,
+        decoded.function,
+        decoded.method.code(),
+        decoded.access,
+    )
 }
 
 fn method_name(m: u32) -> &'static str {
@@ -141,6 +143,30 @@ pub struct IrpHandler {
     #[serde(default)]
     pub derived: String,
     pub addr: u64,
+    /// Instruction that stores the handler pointer into `MajorFunction`.
+    pub loader_addr: u64,
+    /// Raw byte offset of the dispatch slot from the recovered DriverObject base.
+    pub table_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FastIoHandler {
+    pub name: String,
+    pub table_addr: u64,
+    pub table_offset: u64,
+    pub pointer_value: u64,
+    pub target: Option<u64>,
+    pub loader_addr: u64,
+    pub reachability: crate::analysis::reachability::Reachability,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FastIoTableAssignment {
+    pub table_addr: u64,
+    pub loader_addr: u64,
+    pub declared_size: Option<u32>,
+    pub provenance: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +191,52 @@ pub struct Primitive {
     /// drive it.
     #[serde(default)]
     pub reachable: bool,
+    /// Evidence-honest state for new clients. A false legacy boolean means
+    /// unresolved here, not proof that indirect execution is impossible.
+    #[serde(default)]
+    pub reachability: crate::analysis::reachability::Reachability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallbackRegistration {
+    pub api: String,
+    pub category: String,
+    pub registration_site: u64,
+    pub owner_function: Option<String>,
+    pub callback_argument: Option<u8>,
+    pub context_object: Option<u64>,
+    pub target: Option<u64>,
+    pub activations: Vec<CallbackActivation>,
+    pub cancellations: Vec<CallbackCancellation>,
+    pub registration_reachability: crate::analysis::reachability::Reachability,
+    pub target_reachability: crate::analysis::reachability::Reachability,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallbackActivation {
+    pub api: String,
+    pub site: u64,
+    pub owner_function: Option<String>,
+    pub context_object: Option<u64>,
+    pub owner_object: Option<u64>,
+    pub ordering_confirmed: bool,
+    pub reachability: crate::analysis::reachability::Reachability,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CallbackCancellation {
+    pub api: String,
+    pub site: u64,
+    pub owner_function: Option<String>,
+    pub context_object: Option<u64>,
+    pub owner_object: Option<u64>,
+    /// True only when this call is in the same basic block after a matched
+    /// activation. It does not prove cancellation succeeded or won a race.
+    pub after_activation_confirmed: bool,
+    pub reachability: crate::analysis::reachability::Reachability,
+    pub provenance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -185,8 +257,18 @@ pub struct DriverReport {
     pub app_imports: Vec<String>,
     pub devices: Vec<Device>,
     pub irp: Vec<IrpHandler>,
+    #[serde(default)]
+    pub fast_io: Vec<FastIoHandler>,
+    #[serde(default)]
+    pub fast_io_tables: Vec<FastIoTableAssignment>,
     pub ioctls: Vec<Ioctl>,
     pub primitives: Vec<Primitive>,
+    #[serde(default)]
+    pub callback_registrations: Vec<CallbackRegistration>,
+    #[serde(default)]
+    pub callback_activations: Vec<CallbackActivation>,
+    #[serde(default)]
+    pub callback_cancellations: Vec<CallbackCancellation>,
     /// Authenticode signing facts (subjects + thumbprints).
     pub signing: crate::analysis::signing::SigningSummary,
     /// Bundled known-vulnerable-driver matches (loldrivers snapshot).
@@ -259,7 +341,7 @@ pub fn listing_hints(bin: &Binary, bytes: &[u8], an: &Analysis) -> BTreeMap<u64,
     let mut handlers: Vec<(u8, u64)> = Vec::new();
     if let Some(entry_fn) = an.function_at(entry_va) {
         let insns = decode_range(bin, bytes, entry_fn);
-        for (store_ip, major, addr) in dispatch_table_stores(&insns) {
+        for (store_ip, _, major, addr) in dispatch_table_stores(&insns) {
             out.insert(store_ip, slot_hint(major));
             handlers.push((major, addr));
         }
@@ -426,22 +508,53 @@ pub fn report(
     // Only meaningful for native drivers, and 64-bit: the MajorFunction
     // offsets below are the x64 layouts.
     let mut irp: Vec<IrpHandler> = Vec::new();
+    let mut fast_io: Vec<FastIoHandler> = Vec::new();
+    let mut fast_io_tables: Vec<FastIoTableAssignment> = Vec::new();
     let mut ioctls: Vec<Ioctl> = Vec::new();
     let mut listing_hints: BTreeMap<u64, String> = BTreeMap::new();
     if is_driver && bin.bits == 64 {
         if let Some(entry_fn) = an.function_at(entry_va) {
             let insns = decode_range(bin, bytes, entry_fn);
-            for (store_ip, major, addr) in dispatch_table_stores(&insns) {
+            for (store_ip, table_offset, major, addr) in dispatch_table_stores(&insns) {
                 irp.push(IrpHandler {
                     major,
                     name: irp_name(major).to_string(),
                     derived: dispatch_name(major).to_string(),
                     addr,
+                    loader_addr: store_ip,
+                    table_offset,
                 });
                 // `mov [obj+slot], handler` -> what the slot is (base-correct:
                 // `major` was resolved against whichever x64 layout the stores
                 // agreed on, so name the slot from the major directly).
                 listing_hints.insert(store_ip, slot_hint(major));
+            }
+            let known_functions = an
+                .functions
+                .iter()
+                .map(|function| function.addr)
+                .collect::<BTreeSet<_>>();
+            for (loader_addr, table_addr) in fast_io_table_assignments(&insns) {
+                let declared_size = read_static_u32(bin, bytes, table_addr);
+                fast_io_tables.push(FastIoTableAssignment {
+                    table_addr,
+                    loader_addr,
+                    declared_size,
+                    provenance: if declared_size.is_some() {
+                        "STATIC_DRIVER_OBJECT_FAST_IO_TABLE_STORE"
+                    } else {
+                        "STATIC_FAST_IO_TABLE_BYTES_UNAVAILABLE"
+                    }
+                    .into(),
+                });
+                fast_io.extend(parse_fast_io_table(
+                    bin,
+                    bytes,
+                    table_addr,
+                    loader_addr,
+                    &known_functions,
+                ));
+                listing_hints.insert(loader_addr, "FastIoDispatch".into());
             }
         }
         // ioctl codes + parameter-field hints from each device-control handler
@@ -466,6 +579,8 @@ pub fn report(
             }
         }
         irp.sort_by_key(|h| h.major);
+        fast_io.sort_by_key(|handler| (handler.table_addr, handler.table_offset));
+        fast_io_tables.sort_by_key(|table| (table.table_addr, table.loader_addr));
         ioctls.sort_by_key(|i| i.code);
     }
 
@@ -481,16 +596,24 @@ pub fn report(
         let mut primitives: Vec<Primitive> = sinks::find(an)
             .into_iter()
             .filter(|h| kernel.contains(h.api.as_str()))
-            .map(|h| Primitive {
-                reachable: h.sites.iter().any(|s| {
+            .map(|h| {
+                let directly_reachable = h.sites.iter().any(|s| {
                     an.function_at(s.from)
                         .map(|f| reachable.contains(&f.addr))
                         .unwrap_or(false)
-                }),
-                api: h.api,
-                class: h.class.to_string(),
-                severity: h.severity,
-                sites: h.sites,
+                });
+                Primitive {
+                    reachable: directly_reachable,
+                    reachability: if directly_reachable {
+                        crate::analysis::reachability::Reachability::ConfirmedDirect
+                    } else {
+                        crate::analysis::reachability::Reachability::Unresolved
+                    },
+                    api: h.api,
+                    class: h.class.to_string(),
+                    severity: h.severity,
+                    sites: h.sites,
+                }
             })
             .collect();
         primitives.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.api.cmp(&b.api)));
@@ -498,6 +621,11 @@ pub fn report(
     } else {
         Vec::new()
     };
+    let CallbackRecovery {
+        registrations: callback_registrations,
+        activations: callback_activations,
+        cancellations: callback_cancellations,
+    } = recover_callback_registrations(an, &primitives);
     let _ = all;
 
     let signing = crate::analysis::signing::summarize(bin, bytes);
@@ -533,11 +661,492 @@ pub fn report(
         app_imports,
         devices,
         irp,
+        fast_io,
+        fast_io_tables,
         ioctls,
         primitives,
+        callback_registrations,
+        callback_activations,
+        callback_cancellations,
         signing,
         known_bad,
         listing_hints,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CallbackSpec {
+    argument: Option<u8>,
+    category: &'static str,
+    establishes_dispatch: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DpcActivationSpec {
+    context_argument: u8,
+    owner_argument: Option<u8>,
+    provenance: &'static str,
+}
+
+fn dpc_activation_spec(api: &str) -> Option<DpcActivationSpec> {
+    let (context_argument, owner_argument) = match api {
+        "KeInsertQueueDpc" => (0, None),
+        "KeSetTimer" => (2, Some(0)),
+        "KeSetTimerEx" => (3, Some(0)),
+        _ => return None,
+    };
+    Some(DpcActivationSpec {
+        context_argument,
+        owner_argument,
+        provenance: "STATIC_DPC_ACTIVATION_ARGUMENT",
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DpcCancellationSpec {
+    context_argument: Option<u8>,
+    owner_argument: Option<u8>,
+}
+
+fn dpc_cancellation_spec(api: &str) -> Option<DpcCancellationSpec> {
+    match api {
+        "KeRemoveQueueDpc" => Some(DpcCancellationSpec {
+            context_argument: Some(0),
+            owner_argument: None,
+        }),
+        "KeCancelTimer" => Some(DpcCancellationSpec {
+            context_argument: None,
+            owner_argument: Some(0),
+        }),
+        _ => None,
+    }
+}
+
+fn callback_spec(api: &str) -> CallbackSpec {
+    let argument = match api {
+        "PsSetCreateProcessNotifyRoutine"
+        | "PsSetCreateProcessNotifyRoutineEx"
+        | "PsSetCreateThreadNotifyRoutine"
+        | "PsSetLoadImageNotifyRoutine"
+        | "CmRegisterCallback"
+        | "CmRegisterCallbackEx" => Some(0),
+        "IoRegisterBootDriverReinitialization"
+        | "IoRegisterDriverReinitialization"
+        | "IoQueueWorkItem"
+        | "KeInitializeDpc" => Some(1),
+        "IoSetCompletionRoutineEx" => Some(2),
+        _ => Option::None,
+    };
+    let category = match api {
+        "IoSetCompletionRoutineEx" => "IRP_COMPLETION",
+        "IoQueueWorkItem" => "WORK_ITEM",
+        "KeInitializeDpc" => "DPC",
+        "ObRegisterCallbacks" => "OBJECT_CALLBACK_STRUCTURE",
+        _ => "KERNEL_CALLBACK_REGISTRATION",
+    };
+    // KeInitializeDpc only stores the routine. Execution additionally needs a
+    // activation such as queueing the DPC or arming its timer, which this edge has not proven.
+    let establishes_dispatch = argument.is_some() && api != "KeInitializeDpc";
+    CallbackSpec {
+        argument,
+        category,
+        establishes_dispatch,
+    }
+}
+
+fn abi_register(argument: u8) -> Option<iced_x86::Register> {
+    use iced_x86::Register;
+    [Register::RCX, Register::RDX, Register::R8, Register::R9]
+        .get(argument as usize)
+        .copied()
+}
+
+fn canonical_argument_register(register: iced_x86::Register) -> Option<iced_x86::Register> {
+    use iced_x86::Register::*;
+    match register {
+        RCX | ECX | CX | CL | CH => Some(RCX),
+        RDX | EDX | DX | DL | DH => Some(RDX),
+        R8 | R8D | R8W | R8L => Some(R8),
+        R9 | R9D | R9W | R9L => Some(R9),
+        _ => Option::None,
+    }
+}
+
+fn immediate_value(instruction: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::OpKind;
+    match instruction.op1_kind() {
+        OpKind::Immediate64 => Some(instruction.immediate64()),
+        OpKind::Immediate32 | OpKind::Immediate32to64 => Some(instruction.immediate32() as u64),
+        _ => None,
+    }
+}
+
+fn recover_literal_argument(function: &Function, call_site: u64, argument: u8) -> Option<u64> {
+    use iced_x86::{
+        Decoder, DecoderOptions, FlowControl, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
+        Register,
+    };
+    let wanted = abi_register(argument)?;
+    let block = function
+        .blocks
+        .iter()
+        .find(|block| block.insns.iter().any(|insn| insn.addr == call_site))?;
+    let mut values: BTreeMap<Register, u64> = BTreeMap::new();
+    let mut info_factory = InstructionInfoFactory::new();
+    for raw in &block.insns {
+        if raw.addr == call_site {
+            return values.get(&wanted).copied();
+        }
+        let mut decoder = Decoder::with_ip(64, raw.bytes(), raw.addr, DecoderOptions::NONE);
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            values.clear();
+            continue;
+        }
+        if matches!(
+            instruction.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            values.clear();
+            continue;
+        }
+        let destination = (instruction.op0_kind() == OpKind::Register)
+            .then(|| canonical_argument_register(instruction.op0_register()))
+            .flatten();
+        let replacement = destination.and_then(|destination| {
+            let value = match instruction.mnemonic() {
+                Mnemonic::Lea
+                    if instruction.op1_kind() == OpKind::Memory
+                        && instruction.memory_base() == Register::RIP
+                        && instruction.is_ip_rel_memory_operand() =>
+                {
+                    Some(instruction.memory_displacement64())
+                }
+                Mnemonic::Mov if instruction.op1_kind() == OpKind::Register => {
+                    canonical_argument_register(instruction.op1_register())
+                        .and_then(|source| values.get(&source).copied())
+                }
+                Mnemonic::Mov => immediate_value(&instruction),
+                _ => Option::None,
+            };
+            value.map(|value| (destination, value))
+        });
+        for used in info_factory.info(&instruction).used_registers() {
+            if matches!(
+                used.access(),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) {
+                if let Some(register) = canonical_argument_register(used.register()) {
+                    values.remove(&register);
+                }
+            }
+        }
+        if let Some((destination, value)) = replacement {
+            values.insert(destination, value);
+        }
+    }
+    None
+}
+
+fn recover_callback_target(
+    function: &Function,
+    registration_site: u64,
+    argument: u8,
+    known_functions: &BTreeSet<u64>,
+) -> Option<u64> {
+    recover_literal_argument(function, registration_site, argument)
+        .filter(|target| known_functions.contains(target))
+}
+
+fn matching_dpc_activations(
+    context_object: Option<u64>,
+    candidates: &[CallbackActivation],
+) -> Vec<CallbackActivation> {
+    let Some(context_object) = context_object else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .filter(|activation| activation.context_object == Some(context_object))
+        .cloned()
+        .collect()
+}
+
+fn matching_dpc_cancellations(
+    context_object: Option<u64>,
+    activations: &[CallbackActivation],
+    candidates: &[CallbackCancellation],
+) -> Vec<CallbackCancellation> {
+    let Some(context_object) = context_object else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .filter(|cancellation| {
+            cancellation.context_object == Some(context_object)
+                || cancellation.owner_object.is_some_and(|owner_object| {
+                    activations
+                        .iter()
+                        .any(|activation| activation.owner_object == Some(owner_object))
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn function_has_basic_block_order(function: &Function, before: u64, after: u64) -> bool {
+    function.blocks.iter().any(|block| {
+        let before_index = block
+            .insns
+            .iter()
+            .position(|instruction| instruction.addr == before);
+        let after_index = block
+            .insns
+            .iter()
+            .position(|instruction| instruction.addr == after);
+        matches!((before_index, after_index), (Some(before), Some(after)) if before < after)
+    })
+}
+
+fn same_basic_block_order(analysis: &Analysis, before: u64, after: u64) -> bool {
+    let Some(function) = analysis.function_at(before) else {
+        return false;
+    };
+    analysis.function_at(after).map(|candidate| candidate.addr) == Some(function.addr)
+        && function_has_basic_block_order(function, before, after)
+}
+
+fn callback_target_reachability(
+    target: Option<u64>,
+    spec: CallbackSpec,
+    registration_reachability: crate::analysis::reachability::Reachability,
+    activations: &[CallbackActivation],
+) -> crate::analysis::reachability::Reachability {
+    let activated = activations
+        .iter()
+        .any(|activation| activation.reachability.is_confirmed() && activation.ordering_confirmed);
+    if target.is_some()
+        && registration_reachability.is_confirmed()
+        && (spec.establishes_dispatch || activated)
+    {
+        crate::analysis::reachability::Reachability::ConfirmedIndirect
+    } else {
+        crate::analysis::reachability::Reachability::Unresolved
+    }
+}
+
+fn downgrade_ambiguous_dpc_reinitializations(registrations: &mut [CallbackRegistration]) {
+    let mut counts = BTreeMap::<u64, usize>::new();
+    for registration in registrations.iter() {
+        if registration.api == "KeInitializeDpc" {
+            if let Some(context_object) = registration.context_object {
+                *counts.entry(context_object).or_default() += 1;
+            }
+        }
+    }
+    for registration in registrations.iter_mut() {
+        let ambiguous = registration
+            .context_object
+            .and_then(|context_object| counts.get(&context_object))
+            .is_some_and(|count| *count > 1);
+        if registration.api == "KeInitializeDpc" && ambiguous {
+            registration.target_reachability =
+                crate::analysis::reachability::Reachability::Unresolved;
+            registration.provenance = "DPC_OBJECT_REINITIALIZATION_AMBIGUOUS".into();
+        }
+    }
+}
+
+struct CallbackRecovery {
+    registrations: Vec<CallbackRegistration>,
+    activations: Vec<CallbackActivation>,
+    cancellations: Vec<CallbackCancellation>,
+}
+
+fn recover_callback_registrations(
+    analysis: &Analysis,
+    primitives: &[Primitive],
+) -> CallbackRecovery {
+    let known_functions = analysis
+        .functions
+        .iter()
+        .map(|function| function.addr)
+        .collect::<BTreeSet<_>>();
+    let dpc_activation_candidates = primitives
+        .iter()
+        .filter_map(|primitive| dpc_activation_spec(&primitive.api).map(|spec| (primitive, spec)))
+        .flat_map(|(primitive, activation_spec)| {
+            primitive.sites.iter().map(move |site| CallbackActivation {
+                api: primitive.api.clone(),
+                site: site.from,
+                owner_function: site.in_func.clone(),
+                context_object: analysis.function_at(site.from).and_then(|function| {
+                    recover_literal_argument(function, site.from, activation_spec.context_argument)
+                }),
+                owner_object: activation_spec.owner_argument.and_then(|argument| {
+                    analysis.function_at(site.from).and_then(|function| {
+                        recover_literal_argument(function, site.from, argument)
+                    })
+                }),
+                ordering_confirmed: false,
+                reachability: primitive.reachability,
+                provenance: activation_spec.provenance.into(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let dpc_cancellation_candidates = primitives
+        .iter()
+        .filter_map(|primitive| dpc_cancellation_spec(&primitive.api).map(|spec| (primitive, spec)))
+        .flat_map(|(primitive, cancellation_spec)| {
+            primitive
+                .sites
+                .iter()
+                .map(move |site| CallbackCancellation {
+                    api: primitive.api.clone(),
+                    site: site.from,
+                    owner_function: site.in_func.clone(),
+                    context_object: cancellation_spec.context_argument.and_then(|argument| {
+                        analysis.function_at(site.from).and_then(|function| {
+                            recover_literal_argument(function, site.from, argument)
+                        })
+                    }),
+                    owner_object: cancellation_spec.owner_argument.and_then(|argument| {
+                        analysis.function_at(site.from).and_then(|function| {
+                            recover_literal_argument(function, site.from, argument)
+                        })
+                    }),
+                    after_activation_confirmed: false,
+                    reachability: primitive.reachability,
+                    provenance: "STATIC_DPC_CANCELLATION_ARGUMENT_RESULT_UNKNOWN".into(),
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut registrations = primitives
+        .iter()
+        .filter(|primitive| primitive.class == "callback")
+        .flat_map(|primitive| {
+            let spec = callback_spec(&primitive.api);
+            let known_functions = &known_functions;
+            let dpc_activation_candidates = &dpc_activation_candidates;
+            let dpc_cancellation_candidates = &dpc_cancellation_candidates;
+            primitive.sites.iter().map(move |site| {
+                let target = spec.argument.and_then(|argument| {
+                    analysis.function_at(site.from).and_then(|function| {
+                        recover_callback_target(function, site.from, argument, known_functions)
+                    })
+                });
+                let context_object = (primitive.api == "KeInitializeDpc")
+                    .then(|| {
+                        analysis
+                            .function_at(site.from)
+                            .and_then(|function| recover_literal_argument(function, site.from, 0))
+                    })
+                    .flatten();
+                let activations = if primitive.api == "KeInitializeDpc" {
+                    matching_dpc_activations(context_object, dpc_activation_candidates)
+                        .into_iter()
+                        .map(|mut activation| {
+                            activation.ordering_confirmed =
+                                same_basic_block_order(analysis, site.from, activation.site);
+                            if activation.ordering_confirmed {
+                                activation.provenance =
+                                    "STATIC_DPC_ACTIVATION_ARGUMENT_SAME_BLOCK_AFTER_INITIALIZATION"
+                                        .into();
+                            }
+                            activation
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let matched_reachable_activation = activations.iter().any(|activation| {
+                    activation.reachability.is_confirmed() && activation.ordering_confirmed
+                });
+                let cancellations = if primitive.api == "KeInitializeDpc" {
+                    matching_dpc_cancellations(
+                        context_object,
+                        &activations,
+                        dpc_cancellation_candidates,
+                    )
+                        .into_iter()
+                        .map(|mut cancellation| {
+                            let owner_linked = cancellation.owner_object.is_some_and(
+                                |owner_object| {
+                                    activations.iter().any(|activation| {
+                                        activation.owner_object == Some(owner_object)
+                                    })
+                                },
+                            );
+                            cancellation.after_activation_confirmed = activations.iter().any(|activation| {
+                                let same_lifecycle = cancellation.context_object == context_object
+                                    || cancellation.owner_object.is_some_and(|owner_object| {
+                                        activation.owner_object == Some(owner_object)
+                                    });
+                                same_lifecycle
+                                    &&
+                                    same_basic_block_order(
+                                        analysis,
+                                        activation.site,
+                                        cancellation.site,
+                                    )
+                            });
+                            if cancellation.after_activation_confirmed {
+                                cancellation.provenance = if owner_linked {
+                                    "STATIC_TIMER_OWNER_LINK_SAME_BLOCK_AFTER_ACTIVATION_RESULT_UNKNOWN"
+                                } else {
+                                    "STATIC_DPC_CANCELLATION_ARGUMENT_SAME_BLOCK_AFTER_ACTIVATION_RESULT_UNKNOWN"
+                                }
+                                .into();
+                            } else if owner_linked {
+                                cancellation.provenance =
+                                    "STATIC_TIMER_OWNER_LINK_RESULT_UNKNOWN".into();
+                            }
+                            cancellation
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let target_reachability = callback_target_reachability(
+                    target,
+                    spec,
+                    primitive.reachability,
+                    &activations,
+                );
+                CallbackRegistration {
+                    api: primitive.api.clone(),
+                    category: spec.category.into(),
+                    registration_site: site.from,
+                    owner_function: site.in_func.clone(),
+                    callback_argument: spec.argument,
+                    context_object,
+                    target,
+                    activations,
+                    cancellations,
+                    registration_reachability: primitive.reachability,
+                    target_reachability,
+                    provenance: if target.is_some() && matched_reachable_activation {
+                        "DIRECT_ARGUMENT_STATIC_FUNCTION_AND_MATCHED_DPC_ACTIVATION_OBJECT"
+                    } else if target.is_some() {
+                        "DIRECT_ARGUMENT_STATIC_FUNCTION"
+                    } else if spec.argument.is_none() {
+                        "STRUCTURE_BACKED_TARGET_UNRESOLVED"
+                    } else {
+                        "STATIC_REGISTRATION_CALL_TARGET_UNRESOLVED"
+                    }
+                    .into(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    downgrade_ambiguous_dpc_reinitializations(&mut registrations);
+    CallbackRecovery {
+        registrations,
+        activations: dpc_activation_candidates,
+        cancellations: dpc_cancellation_candidates,
     }
 }
 
@@ -561,11 +1170,12 @@ fn decode_range(bin: &Binary, bytes: &[u8], f: &Function) -> Vec<(u64, iced_x86:
     if !crate::analysis::disasm::lifting_supported(bin.arch) {
         return Vec::new();
     }
-    let Some(off) = crate::analysis::disasm::vaddr_to_off(bin, start) else {
+    let base = crate::analysis::engine::display_base(bin);
+    let Some(off) = crate::analysis::engine::va_to_off(bin, base, start) else {
         return Vec::new();
     };
-    let len = end.saturating_sub(start);
-    let code = &bytes[off as usize..(off as usize + len as usize).min(bytes.len())];
+    let len = end.saturating_sub(start) as usize;
+    let code = &bytes[off..off.saturating_add(len).min(bytes.len())];
     let mut dec = iced_x86::Decoder::with_ip(64, code, start, iced_x86::DecoderOptions::NONE);
     let mut out = Vec::new();
     while dec.can_decode() {
@@ -581,48 +1191,105 @@ fn decode_range(bin: &Binary, bytes: &[u8], f: &Function) -> Vec<(u64, iced_x86:
 /// `mov [rX + 0x70 + 8*i], rN` where rX holds DriverObject (rcx on entry, or a
 /// register it was copied into). Returns (major, handler-address) pairs. This
 /// is a heuristic: it only fires on the store shape, never invents handlers.
-/// Returns one `(store_ip, major, handler-addr)` per recovered slot store.
-fn dispatch_table_stores(insns: &[(u64, iced_x86::Instruction)]) -> Vec<(u64, u8, u64)> {
-    use iced_x86::{Mnemonic, OpKind, Register};
-    let bases = crate::analysis::ktypes::MAJOR_BASES;
-    // candidate stores: (store-ip, disp, handler-value)
+/// Returns one `(store_ip, table_offset, major, handler-addr)` per recovered slot store.
+fn driver_object_pointer_stores(insns: &[(u64, iced_x86::Instruction)]) -> Vec<(u64, u64, u64)> {
+    use iced_x86::{InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register};
     let mut cands: Vec<(u64, u64, u64)> = Vec::new();
     let mut reg_value: BTreeMap<Register, u64> = BTreeMap::new();
-    let mut obj_regs: Vec<Register> = vec![Register::RCX];
+    let mut obj_regs: BTreeSet<Register> = BTreeSet::from([Register::RCX]);
+    let mut info_factory = InstructionInfoFactory::new();
     for (ip, i) in insns.iter() {
-        match i.mnemonic() {
-            Mnemonic::Lea if i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Memory => {
-                if i.memory_base() == Register::RIP && i.is_ip_rel_memory_operand() {
-                    // For RIP-relative operands iced reports the absolute target
-                    // in `memory_displacement64()` already (ip+len are folded in).
-                    reg_value.insert(i.op0_register(), i.memory_displacement64());
+        // Consume the pre-instruction state for a pointer store. The store does
+        // not change its source/base registers, so invalidation happens below.
+        if i.mnemonic() == Mnemonic::Mov
+            && i.op0_kind() == OpKind::Memory
+            && i.op1_kind() == OpKind::Register
+        {
+            let base = i.memory_base().full_register();
+            let source = i.op1_register().full_register();
+            if base != Register::None && obj_regs.contains(&base) {
+                if let Some(value) = reg_value.get(&source).copied() {
+                    cands.push((*ip, i.memory_displacement64(), value));
                 }
             }
-            Mnemonic::Mov
-                if i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register =>
+        }
+
+        // Compute replacement facts from the old state before removing every
+        // register the instruction writes (including implicit/secondary writes).
+        let destination =
+            (i.op0_kind() == OpKind::Register).then(|| i.op0_register().full_register());
+        let new_value = destination.and_then(|destination| {
+            let value = if i.mnemonic() == Mnemonic::Lea
+                && i.op1_kind() == OpKind::Memory
+                && i.memory_base() == Register::RIP
+                && i.is_ip_rel_memory_operand()
             {
-                let d = i.op0_register();
-                let s = i.op1_register();
-                if let Some(v) = reg_value.get(&s) {
-                    reg_value.insert(d, *v);
-                }
-                if s == Register::RCX && !obj_regs.contains(&d) {
-                    obj_regs.push(d);
-                }
+                Some(i.memory_displacement64())
+            } else if i.mnemonic() == Mnemonic::Mov && i.op1_kind() == OpKind::Register {
+                reg_value.get(&i.op1_register().full_register()).copied()
+            } else {
+                immediate_value(i).filter(|_| i.mnemonic() == Mnemonic::Mov)
+            };
+            value.map(|value| (destination, value))
+        });
+        let new_object = destination.filter(|_| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.op1_kind() == OpKind::Register
+                && obj_regs.contains(&i.op1_register().full_register())
+        });
+
+        for used in info_factory.info(i).used_registers() {
+            if matches!(
+                used.access(),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) {
+                let register = used.register().full_register();
+                reg_value.remove(&register);
+                obj_regs.remove(&register);
             }
-            Mnemonic::Mov if i.op0_kind() == OpKind::Memory && i.op1_kind() == OpKind::Register => {
-                let base = i.memory_base();
-                let disp = i.memory_displacement64();
-                let in_table = bases.iter().any(|&b| (b..b + 8 * 28).contains(&disp));
-                if base != Register::None && obj_regs.contains(&base) && in_table {
-                    if let Some(value) = reg_value.get(&i.op1_register()).copied() {
-                        cands.push((*ip, disp, value));
-                    }
-                }
+        }
+        if matches!(
+            i.flow_control(),
+            iced_x86::FlowControl::Call | iced_x86::FlowControl::IndirectCall
+        ) {
+            for register in [
+                Register::RAX,
+                Register::RCX,
+                Register::RDX,
+                Register::R8,
+                Register::R9,
+                Register::R10,
+                Register::R11,
+            ] {
+                reg_value.remove(&register);
+                obj_regs.remove(&register);
             }
-            _ => {}
+        } else if matches!(
+            i.flow_control(),
+            iced_x86::FlowControl::UnconditionalBranch
+                | iced_x86::FlowControl::IndirectBranch
+                | iced_x86::FlowControl::ConditionalBranch
+                | iced_x86::FlowControl::Return
+        ) {
+            reg_value.clear();
+            obj_regs.clear();
+        }
+        if let Some((register, value)) = new_value {
+            reg_value.insert(register, value);
+        }
+        if let Some(register) = new_object {
+            obj_regs.insert(register);
         }
     }
+    cands
+}
+
+fn dispatch_table_stores(insns: &[(u64, iced_x86::Instruction)]) -> Vec<(u64, u64, u8, u64)> {
+    let bases = crate::analysis::ktypes::MAJOR_BASES;
+    let cands = driver_object_pointer_stores(insns);
     // Pick the table base the stores actually agree on; ties go to the newer
     // layout so modern drivers win.
     let best = *bases
@@ -634,16 +1301,115 @@ fn dispatch_table_stores(insns: &[(u64, iced_x86::Instruction)]) -> Vec<(u64, u8
                 .count()
         })
         .unwrap_or(&bases[0]);
-    let mut out: Vec<(u64, u8, u64)> = Vec::new();
+    let mut out: Vec<(u64, u64, u8, u64)> = Vec::new();
     for (ip, disp, value) in cands {
         if (best..best + 8 * 28).contains(&disp) {
             let major = ((disp - best) / 8) as u8;
             if major < 28 {
-                out.push((ip, major, value));
+                out.push((ip, disp, major, value));
             }
         }
     }
     out
+}
+
+fn fast_io_table_assignments(insns: &[(u64, iced_x86::Instruction)]) -> Vec<(u64, u64)> {
+    driver_object_pointer_stores(insns)
+        .into_iter()
+        .filter(|(_, offset, _)| *offset == crate::analysis::ktypes::FAST_IO_DISPATCH_OFFSET)
+        .map(|(loader, _, table)| (loader, table))
+        .collect()
+}
+
+const FAST_IO_SLOTS: &[(u64, &str)] = &[
+    (0x08, "FastIoCheckIfPossible"),
+    (0x10, "FastIoRead"),
+    (0x18, "FastIoWrite"),
+    (0x20, "FastIoQueryBasicInfo"),
+    (0x28, "FastIoQueryStandardInfo"),
+    (0x30, "FastIoLock"),
+    (0x38, "FastIoUnlockSingle"),
+    (0x40, "FastIoUnlockAll"),
+    (0x48, "FastIoUnlockAllByKey"),
+    (0x50, "FastIoDeviceControl"),
+    (0x58, "AcquireFileForNtCreateSection"),
+    (0x60, "ReleaseFileForNtCreateSection"),
+    (0x68, "FastIoDetachDevice"),
+    (0x70, "FastIoQueryNetworkOpenInfo"),
+    (0x78, "AcquireForModWrite"),
+    (0x80, "MdlRead"),
+    (0x88, "MdlReadComplete"),
+    (0x90, "PrepareMdlWrite"),
+    (0x98, "MdlWriteComplete"),
+    (0xa0, "FastIoReadCompressed"),
+    (0xa8, "FastIoWriteCompressed"),
+    (0xb0, "MdlReadCompleteCompressed"),
+    (0xb8, "MdlWriteCompleteCompressed"),
+    (0xc0, "FastIoQueryOpen"),
+    (0xc8, "ReleaseForModWrite"),
+    (0xd0, "AcquireForCcFlush"),
+    (0xd8, "ReleaseForCcFlush"),
+];
+
+fn read_static_u64(bin: &Binary, bytes: &[u8], address: u64) -> Option<u64> {
+    let base = crate::analysis::engine::display_base(bin);
+    let offset = crate::analysis::engine::va_to_off(bin, base, address)?;
+    let raw: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_le_bytes(raw))
+}
+
+fn read_static_u32(bin: &Binary, bytes: &[u8], address: u64) -> Option<u32> {
+    let base = crate::analysis::engine::display_base(bin);
+    let offset = crate::analysis::engine::va_to_off(bin, base, address)?;
+    let raw: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_le_bytes(raw))
+}
+
+fn parse_fast_io_table(
+    bin: &Binary,
+    bytes: &[u8],
+    table_addr: u64,
+    loader_addr: u64,
+    known_functions: &BTreeSet<u64>,
+) -> Vec<FastIoHandler> {
+    let Some(declared_size) = read_static_u32(bin, bytes, table_addr).map(u64::from) else {
+        return Vec::new();
+    };
+    if !(8..=0x1000).contains(&declared_size) {
+        return Vec::new();
+    }
+    FAST_IO_SLOTS
+        .iter()
+        .filter(|(offset, _)| offset.saturating_add(8) <= declared_size)
+        .filter_map(|(offset, name)| {
+            let pointer_value = read_static_u64(bin, bytes, table_addr.checked_add(*offset)?)?;
+            if pointer_value == 0 {
+                return None;
+            }
+            let target = known_functions
+                .contains(&pointer_value)
+                .then_some(pointer_value);
+            Some(FastIoHandler {
+                name: (*name).into(),
+                table_addr,
+                table_offset: *offset,
+                pointer_value,
+                target,
+                loader_addr,
+                reachability: if target.is_some() {
+                    crate::analysis::reachability::Reachability::ConfirmedIndirect
+                } else {
+                    crate::analysis::reachability::Reachability::Unresolved
+                },
+                provenance: if target.is_some() {
+                    "STATIC_FAST_IO_TABLE_POINTER"
+                } else {
+                    "STATIC_FAST_IO_POINTER_TARGET_UNRESOLVED"
+                }
+                .into(),
+            })
+        })
+        .collect()
 }
 
 /// Recover literal IOCTL constant compares inside a handler
@@ -700,6 +1466,593 @@ mod tests {
             })
             .collect();
         bin
+    }
+
+    #[test]
+    fn decode_range_maps_based_pe_static_addresses() {
+        use crate::analysis::engine::{BasicBlock, EngineInsn};
+        use crate::model::Section;
+        use iced_x86::FlowControl;
+        let mut bin = Binary::stub(crate::model::Format::Pe, crate::model::Arch::X86_64);
+        bin.image_base = 0x140000000;
+        bin.sections = vec![Section {
+            name: ".text".into(),
+            vaddr: 0x1000,
+            vsize: 1,
+            file_off: 0,
+            file_size: 1,
+            entropy: 0.0,
+            read: true,
+            write: false,
+            exec: true,
+        }];
+        let function = Function {
+            addr: 0x140001000,
+            name: "DriverEntry".into(),
+            blocks: vec![BasicBlock {
+                start: 0x140001000,
+                end: 0x140001001,
+                insns: vec![EngineInsn::new(
+                    0x140001000,
+                    &[0xc3],
+                    FlowControl::Return,
+                    None,
+                    None,
+                )],
+                succ: Vec::new(),
+            }],
+            size: 1,
+            incoming: 0,
+            calls: Vec::new(),
+            named: true,
+            tables: Vec::new(),
+        };
+        let decoded = decode_range(&bin, &[0xc3], &function);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, 0x140001000);
+        assert_eq!(decoded[0].1.mnemonic(), iced_x86::Mnemonic::Ret);
+    }
+
+    #[test]
+    fn fast_io_assignment_is_not_misclassified_as_major_function_zero() {
+        let code = [
+            0x48, 0x8d, 0x05, 0xf9, 0x0f, 0, 0, // lea rax,[rip+0xff9] -> 0x2000
+            0x48, 0x89, 0x41, 0x50, // mov [rcx+0x50],rax
+        ];
+        let mut decoder =
+            iced_x86::Decoder::with_ip(64, &code, 0x1000, iced_x86::DecoderOptions::NONE);
+        let insns = [decoder.decode(), decoder.decode()]
+            .into_iter()
+            .map(|instruction| (instruction.ip(), instruction))
+            .collect::<Vec<_>>();
+        assert_eq!(fast_io_table_assignments(&insns), vec![(0x1007, 0x2000)]);
+        assert!(dispatch_table_stores(&insns).is_empty());
+    }
+
+    #[test]
+    fn overwritten_table_or_driver_object_register_does_not_invent_fast_io_edge() {
+        fn decode(code: &[u8]) -> Vec<(u64, iced_x86::Instruction)> {
+            let mut decoder =
+                iced_x86::Decoder::with_ip(64, code, 0x1000, iced_x86::DecoderOptions::NONE);
+            let mut out = Vec::new();
+            while decoder.can_decode() {
+                let instruction = decoder.decode();
+                out.push((instruction.ip(), instruction));
+            }
+            out
+        }
+        let stale_table = decode(&[
+            0x48, 0x8d, 0x05, 0xf9, 0x0f, 0, 0, // lea rax,[0x2000]
+            0x31, 0xc0, // xor eax,eax
+            0x48, 0x89, 0x41, 0x50, // mov [rcx+0x50],rax
+        ]);
+        assert!(fast_io_table_assignments(&stale_table).is_empty());
+
+        let stale_object = decode(&[
+            0x48, 0x89, 0xcb, // mov rbx,rcx
+            0x31, 0xdb, // xor ebx,ebx
+            0x48, 0x8d, 0x05, 0xf4, 0x0f, 0, 0, // lea rax,[0x2000]
+            0x48, 0x89, 0x43, 0x50, // mov [rbx+0x50],rax
+        ]);
+        assert!(fast_io_table_assignments(&stale_object).is_empty());
+
+        let stale_across_call = decode(&[
+            0x48, 0x89, 0xcb, // mov rbx,rcx (nonvolatile DriverObject)
+            0x48, 0x8d, 0x05, 0xf6, 0x0f, 0, 0, // lea rax,[0x2000]
+            0xff, 0x15, 0, 0, 0, 0, // call [rip] clobbers volatile rax
+            0x48, 0x89, 0x43, 0x50, // mov [rbx+0x50],rax
+        ]);
+        assert!(fast_io_table_assignments(&stale_across_call).is_empty());
+    }
+
+    #[test]
+    fn fast_io_slots_preserve_unknown_nonzero_pointer_values() {
+        use crate::model::Section;
+        let mut bin = Binary::stub(crate::model::Format::Pe, crate::model::Arch::X86_64);
+        bin.image_base = 0x140000000;
+        bin.sections = vec![Section {
+            name: ".rdata".into(),
+            vaddr: 0x2000,
+            vsize: 0xe0,
+            file_off: 0,
+            file_size: 0xe0,
+            entropy: 0.0,
+            read: true,
+            write: false,
+            exec: false,
+        }];
+        let mut bytes = vec![0u8; 0xe0];
+        bytes[0..4].copy_from_slice(&0xe0u32.to_le_bytes());
+        bytes[0x10..0x18].copy_from_slice(&0x140003000u64.to_le_bytes());
+        bytes[0x18..0x20].copy_from_slice(&0xfffff80012345678u64.to_le_bytes());
+        let handlers = parse_fast_io_table(
+            &bin,
+            &bytes,
+            0x140002000,
+            0x140001020,
+            &BTreeSet::from([0x140003000]),
+        );
+        assert_eq!(handlers.len(), 2, "zero FastIoCheckIfPossible is absent");
+        assert_eq!(handlers[0].name, "FastIoRead");
+        assert_eq!(handlers[0].target, Some(0x140003000));
+        assert_eq!(
+            handlers[0].reachability,
+            crate::analysis::reachability::Reachability::ConfirmedIndirect
+        );
+        assert_eq!(handlers[1].name, "FastIoWrite");
+        assert_eq!(handlers[1].pointer_value, 0xfffff80012345678);
+        assert_eq!(handlers[1].target, None);
+        assert_eq!(
+            handlers[1].reachability,
+            crate::analysis::reachability::Reachability::Unresolved
+        );
+    }
+
+    fn callback_setup(intervening_call: bool) -> Function {
+        use crate::analysis::engine::{BasicBlock, EngineInsn};
+        use iced_x86::FlowControl;
+        let mut insns = vec![EngineInsn::new(
+            0x1000,
+            &[0x48, 0x8d, 0x15, 0xf9, 0, 0, 0], // lea rdx,[rip+0xf9] -> 0x1100
+            FlowControl::Next,
+            Some(0x1100),
+            None,
+        )];
+        if intervening_call {
+            insns.push(EngineInsn::new(
+                0x1007,
+                &[0xff, 0x15, 0, 0, 0, 0],
+                FlowControl::IndirectCall,
+                None,
+                Some("OtherApi".into()),
+            ));
+        }
+        let site = if intervening_call { 0x100d } else { 0x1007 };
+        insns.push(EngineInsn::new(
+            site,
+            &[0xff, 0x15, 0, 0, 0, 0],
+            FlowControl::IndirectCall,
+            None,
+            Some("IoQueueWorkItem".into()),
+        ));
+        Function {
+            addr: 0x1000,
+            name: "DriverEntry".into(),
+            blocks: vec![BasicBlock {
+                start: 0x1000,
+                end: site + 6,
+                insns,
+                succ: Vec::new(),
+            }],
+            size: site + 6 - 0x1000,
+            incoming: 0,
+            calls: Vec::new(),
+            named: true,
+            tables: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn direct_callback_argument_recovers_only_known_function_entries() {
+        let function = callback_setup(false);
+        assert_eq!(
+            recover_callback_target(&function, 0x1007, 1, &BTreeSet::from([0x1100])),
+            Some(0x1100)
+        );
+        assert_eq!(
+            recover_callback_target(&function, 0x1007, 1, &BTreeSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn dpc_initialization_does_not_claim_the_callback_will_execute() {
+        let spec = callback_spec("KeInitializeDpc");
+        assert_eq!(spec.argument, Some(1));
+        assert!(!spec.establishes_dispatch);
+        assert!(callback_spec("IoQueueWorkItem").establishes_dispatch);
+    }
+
+    #[test]
+    fn dpc_activation_apis_use_their_documented_abi_arguments() {
+        assert_eq!(
+            dpc_activation_spec("KeInsertQueueDpc")
+                .unwrap()
+                .context_argument,
+            0
+        );
+        assert_eq!(
+            dpc_activation_spec("KeSetTimer").unwrap().context_argument,
+            2
+        );
+        assert_eq!(
+            dpc_activation_spec("KeSetTimer").unwrap().owner_argument,
+            Some(0)
+        );
+        assert_eq!(
+            dpc_activation_spec("KeSetTimerEx")
+                .unwrap()
+                .context_argument,
+            3
+        );
+        assert!(dpc_activation_spec("KeCancelTimer").is_none());
+        assert_eq!(
+            dpc_cancellation_spec("KeCancelTimer").unwrap(),
+            DpcCancellationSpec {
+                context_argument: None,
+                owner_argument: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn dpc_activation_correlation_requires_exact_object_and_confirmed_path() {
+        use crate::analysis::reachability::Reachability;
+        let candidates = vec![
+            CallbackActivation {
+                api: "KeSetTimer".into(),
+                site: 0x1200,
+                owner_function: Some("QueueDpc".into()),
+                context_object: Some(0x3000),
+                owner_object: Some(0x5000),
+                ordering_confirmed: true,
+                reachability: Reachability::ConfirmedDirect,
+                provenance: "STATIC_DPC_ACTIVATION_ARGUMENT".into(),
+            },
+            CallbackActivation {
+                api: "KeInsertQueueDpc".into(),
+                site: 0x1300,
+                owner_function: Some("OrphanQueue".into()),
+                context_object: Some(0x4000),
+                owner_object: None,
+                ordering_confirmed: false,
+                reachability: Reachability::Unresolved,
+                provenance: "STATIC_DPC_ACTIVATION_ARGUMENT".into(),
+            },
+        ];
+        let matched = matching_dpc_activations(Some(0x3000), &candidates);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].site, 0x1200);
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &matched,
+            ),
+            Reachability::ConfirmedIndirect
+        );
+        let wrong_object = matching_dpc_activations(Some(0x5000), &candidates);
+        assert!(wrong_object.is_empty());
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &wrong_object,
+            ),
+            Reachability::Unresolved
+        );
+        let reachable_but_unordered = vec![CallbackActivation {
+            api: "KeInsertQueueDpc".into(),
+            site: 0x1400,
+            owner_function: Some("OtherFunction".into()),
+            context_object: Some(0x6000),
+            owner_object: None,
+            ordering_confirmed: false,
+            reachability: Reachability::ConfirmedDirect,
+            provenance: "STATIC_DPC_ACTIVATION_ARGUMENT".into(),
+        }];
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &reachable_but_unordered,
+            ),
+            Reachability::Unresolved
+        );
+        let unresolved = matching_dpc_activations(Some(0x4000), &candidates);
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &unresolved,
+            ),
+            Reachability::Unresolved
+        );
+    }
+
+    #[test]
+    fn dpc_cancellation_is_counter_evidence_not_proof_of_non_execution() {
+        use crate::analysis::reachability::Reachability;
+        let candidates = vec![CallbackCancellation {
+            api: "KeRemoveQueueDpc".into(),
+            site: 0x1300,
+            owner_function: Some("ScheduleDpc".into()),
+            context_object: Some(0x3000),
+            owner_object: None,
+            after_activation_confirmed: true,
+            reachability: Reachability::ConfirmedDirect,
+            provenance:
+                "STATIC_DPC_CANCELLATION_ARGUMENT_SAME_BLOCK_AFTER_ACTIVATION_RESULT_UNKNOWN".into(),
+        }];
+        assert_eq!(
+            matching_dpc_cancellations(Some(0x3000), &[], &candidates).len(),
+            1
+        );
+        assert!(matching_dpc_cancellations(Some(0x4000), &[], &candidates).is_empty());
+
+        let activation = CallbackActivation {
+            api: "KeInsertQueueDpc".into(),
+            site: 0x1200,
+            owner_function: Some("ScheduleDpc".into()),
+            context_object: Some(0x3000),
+            owner_object: None,
+            ordering_confirmed: true,
+            reachability: Reachability::ConfirmedDirect,
+            provenance: "STATIC_DPC_ACTIVATION_ARGUMENT".into(),
+        };
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &[activation],
+            ),
+            Reachability::ConfirmedIndirect
+        );
+    }
+
+    #[test]
+    fn timer_cancellation_requires_exact_timer_owner_linkage() {
+        use crate::analysis::reachability::Reachability;
+        let activation = CallbackActivation {
+            api: "KeSetTimer".into(),
+            site: 0x1200,
+            owner_function: Some("ArmTimer".into()),
+            context_object: Some(0x3000),
+            owner_object: Some(0x5000),
+            ordering_confirmed: true,
+            reachability: Reachability::ConfirmedDirect,
+            provenance: "STATIC_DPC_ACTIVATION_ARGUMENT".into(),
+        };
+        let cancellation = CallbackCancellation {
+            api: "KeCancelTimer".into(),
+            site: 0x1300,
+            owner_function: Some("ArmTimer".into()),
+            context_object: None,
+            owner_object: Some(0x5000),
+            after_activation_confirmed: true,
+            reachability: Reachability::ConfirmedDirect,
+            provenance: "STATIC_DPC_CANCELLATION_ARGUMENT_RESULT_UNKNOWN".into(),
+        };
+        assert_eq!(
+            matching_dpc_cancellations(
+                Some(0x3000),
+                std::slice::from_ref(&activation),
+                std::slice::from_ref(&cancellation),
+            )
+            .len(),
+            1
+        );
+        let wrong_timer = CallbackCancellation {
+            owner_object: Some(0x6000),
+            ..cancellation
+        };
+        assert!(matching_dpc_cancellations(
+            Some(0x3000),
+            std::slice::from_ref(&activation),
+            &[wrong_timer],
+        )
+        .is_empty());
+        assert_eq!(
+            callback_target_reachability(
+                Some(0x2000),
+                callback_spec("KeInitializeDpc"),
+                Reachability::ConfirmedDirect,
+                &[activation],
+            ),
+            Reachability::ConfirmedIndirect
+        );
+    }
+
+    #[test]
+    fn dpc_object_and_same_block_order_are_deterministic_facts() {
+        use crate::analysis::engine::{BasicBlock, EngineInsn};
+        use iced_x86::FlowControl;
+        let function = Function {
+            addr: 0x1000,
+            name: "ScheduleDpc".into(),
+            blocks: vec![BasicBlock {
+                start: 0x1000,
+                end: 0x1013,
+                insns: vec![
+                    EngineInsn::new(
+                        0x1000,
+                        &[0x48, 0x8d, 0x0d, 0xf9, 0x0f, 0, 0],
+                        FlowControl::Next,
+                        Some(0x2000),
+                        None,
+                    ),
+                    EngineInsn::new(
+                        0x1007,
+                        &[0xff, 0x15, 0, 0, 0, 0],
+                        FlowControl::IndirectCall,
+                        None,
+                        Some("KeInitializeDpc".into()),
+                    ),
+                    EngineInsn::new(
+                        0x100d,
+                        &[0xff, 0x15, 0, 0, 0, 0],
+                        FlowControl::IndirectCall,
+                        None,
+                        Some("KeInsertQueueDpc".into()),
+                    ),
+                ],
+                succ: Vec::new(),
+            }],
+            size: 0x13,
+            incoming: 0,
+            calls: Vec::new(),
+            named: true,
+            tables: Vec::new(),
+        };
+        assert_eq!(recover_literal_argument(&function, 0x1007, 0), Some(0x2000));
+        assert!(function_has_basic_block_order(&function, 0x1007, 0x100d));
+        assert!(!function_has_basic_block_order(&function, 0x100d, 0x1007));
+    }
+
+    #[test]
+    fn timer_dpc_arguments_are_recovered_from_r8_and_r9() {
+        use crate::analysis::engine::{BasicBlock, EngineInsn};
+        use iced_x86::FlowControl;
+        let function = Function {
+            addr: 0x1000,
+            name: "ArmTimers".into(),
+            blocks: vec![BasicBlock {
+                start: 0x1000,
+                end: 0x101a,
+                insns: vec![
+                    EngineInsn::new(
+                        0x1000,
+                        &[0x4c, 0x8d, 0x05, 0xf9, 0x0f, 0, 0],
+                        FlowControl::Next,
+                        Some(0x2000),
+                        None,
+                    ),
+                    EngineInsn::new(
+                        0x1007,
+                        &[0xff, 0x15, 0, 0, 0, 0],
+                        FlowControl::IndirectCall,
+                        None,
+                        Some("KeSetTimer".into()),
+                    ),
+                    EngineInsn::new(
+                        0x100d,
+                        &[0x4c, 0x8d, 0x0d, 0xec, 0x1f, 0, 0],
+                        FlowControl::Next,
+                        Some(0x3000),
+                        None,
+                    ),
+                    EngineInsn::new(
+                        0x1014,
+                        &[0xff, 0x15, 0, 0, 0, 0],
+                        FlowControl::IndirectCall,
+                        None,
+                        Some("KeSetTimerEx".into()),
+                    ),
+                ],
+                succ: Vec::new(),
+            }],
+            size: 0x1a,
+            incoming: 0,
+            calls: Vec::new(),
+            named: true,
+            tables: Vec::new(),
+        };
+        assert_eq!(recover_literal_argument(&function, 0x1007, 2), Some(0x2000));
+        assert_eq!(recover_literal_argument(&function, 0x1014, 3), Some(0x3000));
+    }
+
+    #[test]
+    fn repeated_initialization_of_one_dpc_object_downgrades_all_targets() {
+        use crate::analysis::reachability::Reachability;
+        let make = |site, target| CallbackRegistration {
+            api: "KeInitializeDpc".into(),
+            category: "DPC".into(),
+            registration_site: site,
+            owner_function: Some("ScheduleDpc".into()),
+            callback_argument: Some(1),
+            context_object: Some(0x4000),
+            target: Some(target),
+            activations: Vec::new(),
+            cancellations: Vec::new(),
+            registration_reachability: Reachability::ConfirmedDirect,
+            target_reachability: Reachability::ConfirmedIndirect,
+            provenance: "DIRECT_ARGUMENT_STATIC_FUNCTION_AND_MATCHED_DPC_QUEUE_OBJECT".into(),
+        };
+        let mut registrations = vec![make(0x1000, 0x2000), make(0x1100, 0x3000)];
+        downgrade_ambiguous_dpc_reinitializations(&mut registrations);
+        assert!(registrations.iter().all(|registration| {
+            registration.target_reachability == Reachability::Unresolved
+                && registration.provenance == "DPC_OBJECT_REINITIALIZATION_AMBIGUOUS"
+        }));
+        assert_eq!(registrations[0].target, Some(0x2000));
+        assert_eq!(registrations[1].target, Some(0x3000));
+    }
+
+    #[test]
+    fn intervening_call_invalidates_callback_argument_fact() {
+        let function = callback_setup(true);
+        assert_eq!(
+            recover_callback_target(&function, 0x100d, 1, &BTreeSet::from([0x1100])),
+            None
+        );
+    }
+
+    #[test]
+    fn non_destination_register_write_invalidates_callback_argument_fact() {
+        use crate::analysis::engine::{BasicBlock, EngineInsn};
+        use iced_x86::FlowControl;
+        let function = Function {
+            addr: 0x1000,
+            name: "DriverEntry".into(),
+            blocks: vec![BasicBlock {
+                start: 0x1000,
+                end: 0x100f,
+                insns: vec![
+                    EngineInsn::new(
+                        0x1000,
+                        &[0x48, 0x8d, 0x15, 0xf9, 0, 0, 0],
+                        FlowControl::Next,
+                        Some(0x1100),
+                        None,
+                    ),
+                    // xchg rax,rdx writes RDX even though RDX is not operand 0.
+                    EngineInsn::new(0x1007, &[0x48, 0x92], FlowControl::Next, None, None),
+                    EngineInsn::new(
+                        0x1009,
+                        &[0xff, 0x15, 0, 0, 0, 0],
+                        FlowControl::IndirectCall,
+                        None,
+                        Some("IoQueueWorkItem".into()),
+                    ),
+                ],
+                succ: Vec::new(),
+            }],
+            size: 0xf,
+            incoming: 0,
+            calls: Vec::new(),
+            named: true,
+            tables: Vec::new(),
+        };
+        assert_eq!(
+            recover_callback_target(&function, 0x1009, 1, &BTreeSet::from([0x1100])),
+            None
+        );
     }
 
     #[test]
@@ -783,8 +2136,8 @@ mod tests {
             "MmMapIoSpace is reached from the IRP handler"
         );
         assert!(rep.primitives.iter().any(|p| p.api == "IoCreateDevice"));
-        // The helper at 0x1200 calls KeInitializeMutex but nothing reaches it,
-        // so that primitive must be marked unreachable from user mode.
+        // The helper at 0x1200 calls KeInitializeMutex but no direct path reaches
+        // it, so the compatibility flag is false while reachability stays unresolved.
         let hidden = rep
             .primitives
             .iter()
@@ -792,7 +2145,7 @@ mod tests {
             .expect("sync primitive from the unreferenced helper");
         assert!(
             !hidden.reachable,
-            "KeInitializeMutex is only called from an orphaned function"
+            "KeInitializeMutex has no confirmed direct path"
         );
         assert!(rep.kernel_imports.contains_key("ntoskrnl.dll"));
     }

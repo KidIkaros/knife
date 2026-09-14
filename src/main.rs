@@ -53,7 +53,15 @@ enum Command {
         rules: Option<String>,
     },
     /// List sections/segments with entropy.
-    Sections { file: String },
+    Sections {
+        file: String,
+        #[arg(long)]
+        details: bool,
+    },
+    /// Inspect the complete ELF file header (no function analysis).
+    Headers { file: String },
+    /// Inspect ELF program headers (segments).
+    Segments { file: String },
     /// List imported libraries and functions.
     Imports { file: String },
     /// List exported symbols.
@@ -129,6 +137,18 @@ enum Command {
         /// Instead of a symbol, find references to strings containing this text.
         #[arg(long)]
         str: Option<String>,
+    },
+    /// Recovered incoming call sites (including identified tail-call jumps).
+    Callers {
+        file: String,
+        #[arg(long = "function", alias = "func")]
+        function: String,
+    },
+    /// Recovered outgoing call sites; unresolved indirect calls are not fabricated.
+    Callees {
+        file: String,
+        #[arg(long = "function", alias = "func")]
+        function: String,
     },
     /// Show how a sink is reached: call chains from entry points and exports.
     Paths {
@@ -337,50 +357,13 @@ fn main() {
 fn real_main() -> Result<()> {
     // Allow `knife <file>` as shorthand for `knife info <file>`.
     let mut args: Vec<String> = std::env::args().collect();
-    let known = [
-        "info",
-        "sections",
-        "imports",
-        "exports",
-        "caps",
-        "sec",
-        "sinks",
-        "audit",
-        "strings",
-        "iocs",
-        "hashes",
-        "drv",
-        "dis",
-        "pseudo",
-        "xrefs",
-        "paths",
-        "graph",
-        "name",
-        "note",
-        "field",
-        "type",
-        "var",
-        "patch",
-        "proto",
-        "typelib",
-        "db",
-        "tui",
-        "mcp",
-        "hex",
-        "map",
-        "scan",
-        "yara",
-        "funcs",
-        "ls",
-        "completions",
-        "diff",
-        "help",
-        "-h",
-        "--help",
-        "-V",
-        "--version",
-    ];
-    if args.len() >= 2 && !known.contains(&args[1].as_str()) && !args[1].starts_with('-') {
+    // Derive dispatch from clap so new commands cannot drift from a second list.
+    let command = <Cli as clap::CommandFactory>::command();
+    if args.len() >= 2
+        && command.find_subcommand(&args[1]).is_none()
+        && args[1] != "help"
+        && !args[1].starts_with('-')
+    {
         args.insert(1, "info".into());
     }
 
@@ -398,7 +381,15 @@ fn real_main() -> Result<()> {
 
     match cli.cmd {
         Command::Info { file, rules } => cmd_info(&file, rules.as_deref(), cli.json),
-        Command::Sections { file } => cmd_sections(&file, cli.json),
+        Command::Sections { file, details } => {
+            if details {
+                cmd_elf_headers(&file, "sections", cli.json)
+            } else {
+                cmd_sections(&file, cli.json)
+            }
+        }
+        Command::Headers { file } => cmd_elf_headers(&file, "header", cli.json),
+        Command::Segments { file } => cmd_elf_headers(&file, "segments", cli.json),
         Command::Imports { file } => cmd_imports(&file, cli.json),
         Command::Exports { file } => cmd_exports(&file, cli.json),
         Command::Caps { file } => cmd_caps(&file, cli.json),
@@ -425,6 +416,20 @@ fn real_main() -> Result<()> {
             &file,
             target.as_deref(),
             str.as_deref(),
+            cli.json,
+            cli.db.as_deref(),
+        ),
+        Command::Callers { file, function } => cmd_references(
+            &file,
+            &function,
+            reknife::api::references::ReferenceView::Callers,
+            cli.json,
+            cli.db.as_deref(),
+        ),
+        Command::Callees { file, function } => cmd_references(
+            &file,
+            &function,
+            reknife::api::references::ReferenceView::Callees,
             cli.json,
             cli.db.as_deref(),
         ),
@@ -1798,14 +1803,18 @@ fn print_sections(bin: &Binary) {
         "entropy".style(faint()),
         "".style(faint())
     );
-    for s in &bin.sections {
-        let name_style = if s.is_wx() { red() } else { Style::new() };
+    for s in reknife::api::binary_summary::sections(bin) {
+        let name_style = if s.flags.contains('w') && s.flags.contains('x') {
+            red()
+        } else {
+            Style::new()
+        };
         let est = entropy_style(s.entropy);
         println!(
             "  {:<20} {:<5} {:>10} {:>10}  {} {}",
             truncate(&s.name, 20).style(name_style),
-            s.flags(),
-            s.vsize,
+            s.flags,
+            s.virtual_size,
             s.file_size,
             entropy_bar(s.entropy, 20).style(est),
             format!("{:.2}", s.entropy).style(est),
@@ -1813,11 +1822,57 @@ fn print_sections(bin: &Binary) {
     }
 }
 
+fn cmd_elf_headers(file: &str, view: &str, as_json: bool) -> Result<()> {
+    let report = reknife::api::elf_headers::inspect(&load(file)?)?;
+    let value = match view {
+        "header" => serde_json::to_value(&report.header)?,
+        "segments" => serde_json::to_value(&report.segments)?,
+        _ => serde_json::to_value(&report.sections)?,
+    };
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!("ELF {view} — e_phoff/e_shoff/p_offset/sh_offset: FILE OFFSET");
+        println!("e_entry/p_vaddr/sh_addr: STATIC VA; p_paddr: declared PHYSICAL ADDRESS");
+        let records = value
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| std::slice::from_ref(&value));
+        if records.is_empty() {
+            println!("(no entries)");
+        }
+        for record in records {
+            if let Some(fields) = record.as_object() {
+                for (name, value) in fields {
+                    if name == "e_ident" {
+                        let hex: Vec<String> = report
+                            .header
+                            .e_ident
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        println!("  {name:<18} {}", hex.join(" "));
+                    } else if let Some(n) = value.as_u64() {
+                        println!("  {name:<18} {n:#x} ({n})");
+                    } else {
+                        println!("  {name:<18} {value}");
+                    }
+                }
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_sections(file: &str, as_json: bool) -> Result<()> {
     let bytes = load(file)?;
     let bin = parse(file, &bytes)?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&bin.sections)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&reknife::api::binary_summary::sections(&bin))?
+        );
     } else {
         print_sections(&bin);
     }
@@ -2532,6 +2587,42 @@ fn print_xref(an: &engine::Analysis, x: &engine::Xref) {
     );
 }
 
+fn cmd_references(
+    file: &str,
+    selector: &str,
+    view: reknife::api::references::ReferenceView,
+    as_json: bool,
+    db_path: Option<&str>,
+) -> Result<()> {
+    let session = Session::open(file, db_path, ANALYSIS_BUDGET, "call references")?;
+    let address = reknife::api::navigation::resolve_address_in(&session.an, selector)?;
+    if view == reknife::api::references::ReferenceView::Callees
+        && session.an.function_at(address.get()).is_none()
+    {
+        anyhow::bail!("no recovered function at {selector:?}; use `knife funcs` to select one");
+    }
+    let rows = reknife::api::references::query(&session, address, view);
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        println!("SOURCE STATIC VA   TARGET STATIC VA   KIND    SOURCE -> TARGET");
+        for row in &rows {
+            println!(
+                "{:016x}   {:016x}   {:7} {} -> {}",
+                row.source.get(),
+                row.target.get(),
+                row.kind.label(),
+                row.source_label,
+                row.target_label
+            );
+        }
+        if rows.is_empty() {
+            println!("No recovered call sites. This does not prove unreachability; indirect calls may remain unresolved.");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_xrefs(
     file: &str,
     target: Option<&str>,
@@ -2977,12 +3068,7 @@ fn dis_function_json(sess: &Session, sel: &str) -> Result<()> {
 /// Resolve a selector the way the listing commands do: a name, or an address
 /// with or without the image base.
 fn resolve_function<'a>(an: &'a engine::Analysis, sel: &str) -> Option<&'a engine::Function> {
-    if let Some(f) = an.find_by_name(sel) {
-        return Some(f);
-    }
-    let v = parse_num(sel).ok()?;
-    let internal = v.checked_sub(an.display_base).unwrap_or(v);
-    an.find_function(internal).or_else(|| an.find_function(v))
+    reknife::api::navigation::resolve_function_in(an, sel)
 }
 
 fn dis_function(sess: &Session, sel: &str) -> Result<()> {
@@ -3631,6 +3717,19 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::formats::fixture;
+
+    #[test]
+    fn call_reference_commands_require_explicit_function_selectors() {
+        assert!(
+            matches!(Cli::try_parse_from(["knife", "callers", "target.exe", "--function", "entry"]).unwrap().cmd,
+            Command::Callers { function, .. } if function == "entry")
+        );
+        assert!(
+            matches!(Cli::try_parse_from(["knife", "callees", "target.exe", "--func", "0x1000", "--json"]).unwrap().cmd,
+            Command::Callees { function, .. } if function == "0x1000")
+        );
+        assert!(Cli::try_parse_from(["knife", "callees", "target.exe"]).is_err());
+    }
 
     #[test]
     fn commands_without_a_json_form_are_named_and_the_rest_are_not() {

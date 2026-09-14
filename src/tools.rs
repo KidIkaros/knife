@@ -1,12 +1,9 @@
 //! The read-tool catalog: one source of truth for every read-only analysis
 //! query over a loaded [`Session`].
 //!
-//! knife has three consumers that all reach the same engine — the in-app agent,
-//! the MCP server (`knife mcp`), and the GUI's commands. Before this module each
-//! kept its own hand-written list, so a new analysis had to be wired three times
-//! and usually reached only one. Here every tool is declared once, takes a
-//! `&Session`, and returns structured JSON; a consumer chooses how to present it.
-//! Adding an analysis to [`catalog`] and [`dispatch`] lights it up everywhere.
+//! The MCP server (`knife mcp`) exposes this catalog over the same deterministic
+//! engine used by CLI/TUI. Each tool takes a `&Session` and returns structured
+//! JSON. Full CLI/TUI/MCP query parity remains a separate stabilization task.
 
 use crate::analysis::{
     audit, capabilities, driver, engine, entropy, graphs, hardening, hashes, ir, loldrivers,

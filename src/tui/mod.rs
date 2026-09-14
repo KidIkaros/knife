@@ -6,11 +6,16 @@
 //! parts (navigation, filtering, the follow-and-return stack) can be tested
 //! without a terminal; `render` only ever reads.
 
+mod browser;
+mod command;
+mod layout;
+mod navigation;
 /// Deterministic demo recorder for the README animation. Dev-only, so it
 /// is compiled out of the published crate unless the feature is asked for.
 #[cfg(feature = "record")]
 pub mod record;
 mod render;
+pub use navigation::NavigationLocation;
 mod splash;
 
 const GRAPH_NODE_WIDTH: u16 = 7;
@@ -153,7 +158,7 @@ use ratatui::crossterm::event::{
 };
 use std::collections::BTreeMap;
 use std::io::stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -177,6 +182,7 @@ pub enum LeftView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefView {
     To,
+    Callers,
     From,
 }
 
@@ -215,6 +221,7 @@ pub struct TyRow {
 /// What a prompt at the bottom of the screen is collecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
+    Command,
     Filter,
     Name,
     Note,
@@ -242,6 +249,7 @@ pub enum Ask {
 impl Ask {
     fn label(self) -> &'static str {
         match self {
+            Ask::Command => ":",
             Ask::Filter => "filter",
             Ask::Name => "name",
             Ask::Note => "note",
@@ -287,7 +295,7 @@ pub struct Prompt {
 /// view opens, so `App::new` stays cheap.
 ///
 /// The target travels with the result rather than being cloned into the
-/// worker. The main thread only animates the splash while the analysis runs,
+/// worker. The main thread only reports progress while the analysis runs,
 /// so it has no use for the image in the meantime, and a copy of it costs as
 /// much resident memory as the file is large.
 struct WorkResult {
@@ -297,6 +305,7 @@ struct WorkResult {
     an: crate::analysis::engine::Analysis,
     sinks: Vec<crate::analysis::audit::Finding>,
     strings: BTreeMap<u64, Located>,
+    driver: Option<crate::analysis::driver::DriverReport>,
 }
 
 pub struct App {
@@ -314,11 +323,13 @@ pub struct App {
     pub order: Vec<usize>,
     pub sel: usize,
     pub filter: String,
+    pub browser: Option<browser::Browser>,
 
     // ── listing ──
     pub cur: Option<u64>,
     pub lines: Vec<Line>,
     pub cursor: usize,
+    view_positions: navigation::ViewPositions,
     /// When set, the listing pane shows decompiled pseudocode for the current
     /// function instead of the disassembly.
     pub pseudo: bool,
@@ -330,14 +341,18 @@ pub struct App {
 
     // ── the rest ──
     pub focus: Focus,
+    pub pane_settings: layout::PaneSettings,
     pub prompt: Option<Prompt>,
-    pub history: Vec<(u64, usize)>,
+    command_history: command::History,
+    pub history: Vec<NavigationLocation>,
+    pub future: Vec<NavigationLocation>,
     pub status: String,
     pub help: bool,
     pub quit: bool,
     /// Cursor into the cross-reference list (a separate list pane, so it has a
     /// selection of its own like the other two).
     pub xsel: usize,
+    pub reference_anchor: Option<u64>,
     /// Terminal size, refreshed before each frame so mouse coordinates from
     /// events can be mapped onto the panes without guessing.
     pub dims: (u16, u16),
@@ -378,11 +393,10 @@ pub struct App {
     /// Whether the reference pane shows callers (to) or callees (from).
     pub refview: RefView,
 
-    // ── splash animation ──
-    /// Redraw counter, bumped every loop iteration. The splash and the header
-    /// spinner derive their phase from it, so they animate without input.
+    // Legacy demo-recorder state; normal startup never enables the intro.
+    /// Recorder frame counter. The interactive event loop does not advance it.
     pub frame: u64,
-    /// Whether the animated intro is still playing. Any key clears it.
+    /// Explicit legacy recording mode. Defaults to false in the workstation.
     pub splash: bool,
 }
 
@@ -409,19 +423,25 @@ impl App {
             order: Vec::new(),
             sel: 0,
             filter: String::new(),
+            browser: None,
             cur: None,
             lines: Vec::new(),
             cursor: 0,
+            view_positions: navigation::ViewPositions::default(),
             pseudo: false,
             graph: false,
             pseudo_lines: Vec::new(),
             focus: Focus::Functions,
+            pane_settings: layout::PaneSettings::default(),
             prompt: None,
+            command_history: command::History::default(),
             history: Vec::new(),
+            future: Vec::new(),
             status: String::new(),
             help: false,
             quit: false,
             xsel: 0,
+            reference_anchor: None,
             dims: (0, 0),
             strings,
             sinks,
@@ -437,7 +457,7 @@ impl App {
             search: String::new(),
             refview: RefView::To,
             frame: 0,
-            splash: true,
+            splash: false,
         };
         app.refilter();
         // Open something immediately: an empty right-hand pane makes the tool
@@ -501,12 +521,18 @@ impl App {
         let Some(faddr) = target else {
             if self.an.xrefs_from.contains_key(&addr) || self.is_mapped(addr) {
                 if push {
-                    if let Some(prev) = self.cur {
-                        self.history.push((prev, self.cursor));
+                    if let Some(previous) = self.navigation_location() {
+                        self.history.push(previous);
+                        self.future.clear();
                     }
                 }
                 self.lines = listing::data_view(&self.bin, self.base, &self.bytes, addr);
+                self.pseudo = false;
+                self.graph = false;
+                self.pseudo_lines.clear();
+                self.view_positions = navigation::ViewPositions::default();
                 self.cur = Some(addr);
+                self.reference_anchor = None;
                 self.cursor = 0;
                 self.clamp_xsel();
                 return;
@@ -519,11 +545,15 @@ impl App {
         };
 
         if push {
-            if let Some(prev) = self.cur {
-                self.history.push((prev, self.cursor));
+            if let Some(previous) = self.navigation_location() {
+                self.history.push(previous);
+                self.future.clear();
             }
         }
 
+        if self.cur != Some(faddr) {
+            self.view_positions = navigation::ViewPositions::default();
+        }
         let f = self.an.find_function(faddr).expect("just resolved");
         let graph_cursor = self.graph.then(|| {
             f.blocks
@@ -540,6 +570,7 @@ impl App {
             self.driver.as_ref().map(|d| &d.listing_hints),
         );
         self.cur = Some(faddr);
+        self.reference_anchor = None;
         self.clamp_xsel();
         // Land on the requested address, not merely the top of the function.
         self.cursor = self
@@ -547,6 +578,7 @@ impl App {
             .iter()
             .position(|l| l.addr() == addr)
             .unwrap_or(0);
+        self.view_positions.disassembly = self.cursor;
         if let Some(block) = graph_cursor {
             self.cursor = block;
         }
@@ -559,7 +591,10 @@ impl App {
         }
         if self.pseudo {
             self.recompute_pseudo();
-            self.cursor = 0;
+            self.cursor = self
+                .view_positions
+                .pseudocode
+                .min(self.pseudo_lines.len().saturating_sub(1));
         }
     }
 
@@ -593,7 +628,6 @@ impl App {
 
     /// Switch the listing pane between disassembly and decompiled pseudocode.
     pub fn toggle_pseudo(&mut self) {
-        self.graph = false;
         if !self.pseudo {
             self.recompute_pseudo();
             if self.pseudo_lines.is_empty() {
@@ -601,24 +635,51 @@ impl App {
                 return;
             }
         }
+        self.remember_view_cursor();
+        self.graph = false;
         self.pseudo = !self.pseudo;
-        self.cursor = 0;
+        self.cursor = if self.pseudo {
+            self.view_positions.pseudocode
+        } else {
+            self.view_positions.disassembly
+        }
+        .min(self.listing_len().saturating_sub(1));
     }
 
     /// Switch between the linear listing and the function's control-flow graph.
     pub fn toggle_graph(&mut self) {
         if self.graph {
+            let address = self
+                .current_function()
+                .and_then(|f| f.blocks.get(self.cursor))
+                .map(|block| block.start);
             self.graph = false;
-            self.cursor = 0;
+            self.cursor = address
+                .and_then(|address| self.lines.iter().position(|line| line.addr() == address))
+                .unwrap_or(self.view_positions.disassembly)
+                .min(self.lines.len().saturating_sub(1));
             return;
         }
         if self.current_function().is_none() {
             self.status = "no graph here: open a recovered function first".into();
             return;
         }
+        self.remember_view_cursor();
+        let address = self
+            .lines
+            .get(self.view_positions.disassembly)
+            .map(Line::addr);
+        let block = self
+            .current_function()
+            .and_then(|f| {
+                f.blocks.iter().position(|block| {
+                    address.is_some_and(|address| address >= block.start && address < block.end)
+                })
+            })
+            .unwrap_or(0);
         self.pseudo = false;
         self.graph = true;
-        self.cursor = 0;
+        self.cursor = block;
     }
 
     fn open_graph_block(&mut self) {
@@ -697,12 +758,66 @@ impl App {
     }
 
     pub fn back(&mut self) {
-        let Some((addr, cursor)) = self.history.pop() else {
+        let Some(location) = self.history.pop() else {
             self.status = "nothing to go back to".into();
             return;
         };
-        self.open(addr, false);
-        self.cursor = cursor.min(self.lines.len().saturating_sub(1));
+        if let Some(current) = self.navigation_location() {
+            self.future.push(current);
+        }
+        self.restore_navigation(location);
+    }
+
+    pub fn forward(&mut self) {
+        let Some(location) = self.future.pop() else {
+            self.status = "nothing to go forward to".into();
+            return;
+        };
+        if let Some(current) = self.navigation_location() {
+            self.history.push(current);
+        }
+        self.restore_navigation(location);
+    }
+
+    fn remember_view_cursor(&mut self) {
+        self.view_positions = self.current_view_positions();
+    }
+
+    fn current_view_positions(&self) -> navigation::ViewPositions {
+        let mut positions = self.view_positions;
+        if self.pseudo {
+            positions.pseudocode = self.cursor;
+        } else if !self.graph {
+            positions.disassembly = self.cursor;
+        }
+        positions
+    }
+
+    fn navigation_location(&self) -> Option<NavigationLocation> {
+        self.cur.map(|address| NavigationLocation {
+            address,
+            cursor: self.cursor,
+            positions: self.current_view_positions(),
+            pseudo: self.pseudo,
+            graph: self.graph,
+            focus: self.focus,
+            reference_view: self.refview,
+            reference_cursor: self.xsel,
+            reference_anchor: self.reference_anchor,
+        })
+    }
+
+    fn restore_navigation(&mut self, location: NavigationLocation) {
+        self.pseudo = location.pseudo;
+        self.graph = location.graph;
+        self.open(location.address, false);
+        self.view_positions = location.positions;
+        self.cursor = location.cursor.min(self.listing_len().saturating_sub(1));
+        self.focus = location.focus;
+        self.refview = location.reference_view;
+        self.xsel = location.reference_cursor;
+        self.reference_anchor = location.reference_anchor;
+        self.clamp_xsel();
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -779,6 +894,7 @@ impl App {
 
     /// Cycle the left pane: functions → sinks → driver → analyst types → back.
     pub fn toggle_sinks(&mut self) {
+        self.browser = None;
         self.left = match self.left {
             LeftView::Functions => LeftView::Sinks,
             LeftView::Sinks => LeftView::Driver,
@@ -1147,6 +1263,10 @@ impl App {
 
     /// Route a typed filter to whichever pane is focused.
     fn set_filter(&mut self, text: String) {
+        if let Some(browser) = &mut self.browser {
+            browser.filter(text);
+            return;
+        }
         match self.left {
             LeftView::Driver => {
                 self.dsrch = text;
@@ -1166,6 +1286,14 @@ impl App {
     /// The address the cursor is on, which is what a name, note, or
     /// cross-reference lookup applies to.
     pub fn cursor_addr(&self) -> Option<u64> {
+        if self.focus == Focus::Functions {
+            if let Some(browser) = &self.browser {
+                return browser
+                    .selected()
+                    .and_then(|row| row.address)
+                    .map(|address| address.get());
+            }
+        }
         match self.focus {
             // A pseudocode line has no address of its own, so naming and noting
             // in that view apply to the function as a whole.
@@ -1224,71 +1352,39 @@ impl App {
 
     /// The address the reference pane keys off: whatever is under the cursor.
     pub fn xref_at(&self) -> u64 {
+        if self.focus == Focus::Xrefs {
+            if let Some(address) = self.reference_anchor {
+                return address;
+            }
+        }
         self.cursor_addr().or(self.cur).unwrap_or(0)
     }
 
-    /// The name of a call/reference site: its function, with an offset when the
-    /// site is inside one rather than at its head.
-    fn site_name(&self, addr: u64) -> String {
-        match self.an.function_at(addr) {
-            Some(fun) => {
-                let off = addr.saturating_sub(fun.addr);
-                if off == 0 {
-                    fun.name.clone()
-                } else {
-                    format!("{}+0x{off:x}", fun.name)
-                }
-            }
-            None => "-".into(),
-        }
-    }
-
-    /// The reference pane's rows: callers of what is under the cursor, or the
-    /// callees of the current function.
+    /// Project the shared reference query into navigable terminal rows.
     pub fn xref_rows(&self) -> Vec<XRow> {
-        match self.refview {
-            RefView::To => {
-                let at = self.xref_at();
-                self.an
-                    .xrefs_to
-                    .get(&at)
-                    .map(|v| {
-                        v.iter()
-                            .map(|x| XRow {
-                                jump: x.from,
-                                site: x.from,
-                                kind: x.kind.label(),
-                                label: self.site_name(x.from),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
-            RefView::From => {
-                let mut seen = std::collections::BTreeSet::new();
-                let mut rows = Vec::new();
-                for l in &self.lines {
-                    let Some(t) = l.target() else { continue };
-                    if !seen.insert(t) {
-                        continue;
-                    }
-                    let name = self
-                        .an
-                        .find_function(t)
-                        .map(|f| f.name.clone())
-                        .or_else(|| self.an.imports.get(&t).cloned());
-                    if let Some(name) = name {
-                        rows.push(XRow {
-                            jump: t,
-                            site: l.addr(),
-                            kind: "call",
-                            label: name,
-                        });
-                    }
-                }
-                rows
-            }
-        }
+        use crate::api::references::{query_in, ReferenceView};
+        let (address, view) = match self.refview {
+            RefView::To => (self.xref_at(), ReferenceView::Xrefs),
+            RefView::Callers => (self.cur.unwrap_or(0), ReferenceView::Callers),
+            RefView::From => (self.cur.unwrap_or(0), ReferenceView::Callees),
+        };
+        query_in(&self.an, crate::address::StaticVa(address), view)
+            .into_iter()
+            .map(|row| XRow {
+                jump: if view == ReferenceView::Callees {
+                    row.target.get()
+                } else {
+                    row.source.get()
+                },
+                site: row.source.get(),
+                kind: row.kind.label(),
+                label: if view == ReferenceView::Callees {
+                    row.target_label
+                } else {
+                    row.source_label
+                },
+            })
+            .collect()
     }
 
     pub fn clamp_xsel(&mut self) {
@@ -1308,6 +1404,7 @@ impl App {
     pub fn toggle_refs(&mut self) {
         self.refview = match self.refview {
             RefView::To => RefView::From,
+            RefView::Callers => RefView::From,
             RefView::From => RefView::To,
         };
         self.xsel = 0;
@@ -1349,24 +1446,21 @@ impl App {
     ) {
         let stored = at.wrapping_sub(self.base);
         match ask {
+            Ask::Command => {
+                self.command_history.record(&text);
+                self.execute_command(&text);
+            }
             Ask::Filter => {
                 self.set_filter(text);
             }
-            Ask::Goto => {
-                match parse_addr(&text)
-                    .map(|v| vec![v])
-                    .filter(|v| !v.is_empty())
-                    .or_else(|| Some(self.an.resolve(&text, None)))
-                    .filter(|v| !v.is_empty())
-                {
-                    Some(v) => self.open(v[0], true),
-                    None => self.status = format!("no symbol or address '{text}'"),
-                }
-            }
+            Ask::Goto => match crate::api::navigation::resolve_address_in(&self.an, &text) {
+                Ok(address) => self.open(address.get(), true),
+                Err(error) => self.status = error.to_string(),
+            },
             Ask::Search => self.search_listing(text),
             Ask::Name => {
                 if text.is_empty() {
-                    let (n, _) = self.db.clear(stored);
+                    let n = self.db.clear_name(stored);
                     self.status = match n {
                         Some(old) => format!("cleared the name {old}"),
                         None => "nothing to clear".into(),
@@ -1380,7 +1474,7 @@ impl App {
             }
             Ask::Note => {
                 if text.is_empty() {
-                    self.db.clear(stored);
+                    self.db.clear_note(stored);
                     self.status = "cleared the note".into();
                 } else {
                     self.db.set_note(stored, &text);
@@ -1632,6 +1726,7 @@ impl App {
             // one, and only the engine can do that.
             _ => self.reanalyze(),
         }
+        self.an.rebuild_indexes();
         self.refilter();
         self.relist();
     }
@@ -1655,6 +1750,7 @@ impl App {
             self.recompute_pseudo();
         }
         self.cursor = self.cursor.min(self.listing_len().saturating_sub(1));
+        self.refresh_catalog();
     }
 
     pub fn reanalyze(&mut self) {
@@ -1696,6 +1792,20 @@ impl App {
 
         if let Some(p) = &mut self.prompt {
             match key.code {
+                KeyCode::Up if p.ask == Ask::Command => {
+                    p.input = self.command_history.previous(&p.input);
+                }
+                KeyCode::Down if p.ask == Ask::Command => {
+                    p.input = self.command_history.next(&p.input);
+                }
+                KeyCode::Tab if p.ask == Ask::Command => {
+                    let matches = command::complete(&p.input);
+                    if matches.len() == 1 {
+                        p.input = format!("{} ", matches[0]);
+                    } else {
+                        self.status = matches.join("  ");
+                    }
+                }
                 KeyCode::Esc => self.prompt = None,
                 KeyCode::Enter => {
                     let p = self.prompt.take().expect("checked above");
@@ -1729,15 +1839,40 @@ impl App {
         self.status.clear();
         let page = 20isize;
         match key.code {
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => self.back(),
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => self.forward(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Functions => Focus::Listing,
-                    Focus::Listing => Focus::Xrefs,
-                    Focus::Xrefs => Focus::Functions,
+            KeyCode::Char('b') => self.execute_command("bookmark"),
+            KeyCode::Char(':') => {
+                self.command_history.reset();
+                self.ask(Ask::Command);
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if self.focus == Focus::Listing {
+                    self.reference_anchor = Some(self.xref_at());
                 }
+                let reverse =
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                self.focus = if reverse {
+                    match self.focus {
+                        Focus::Listing if self.pane_settings.functions => Focus::Functions,
+                        Focus::Listing | Focus::Functions if self.pane_settings.references => {
+                            Focus::Xrefs
+                        }
+                        _ => Focus::Listing,
+                    }
+                } else {
+                    match self.focus {
+                        Focus::Functions => Focus::Listing,
+                        Focus::Listing if self.pane_settings.references => Focus::Xrefs,
+                        Focus::Listing | Focus::Xrefs if self.pane_settings.functions => {
+                            Focus::Functions
+                        }
+                        _ => Focus::Listing,
+                    }
+                };
             }
             KeyCode::Left if self.focus == Focus::Listing && self.graph => self.move_graph(-1, 0),
             KeyCode::Right if self.focus == Focus::Listing && self.graph => self.move_graph(1, 0),
@@ -1753,6 +1888,9 @@ impl App {
             KeyCode::PageUp => self.step(-page),
             KeyCode::Home => self.step(isize::MIN / 2),
             KeyCode::End => self.step(isize::MAX / 2),
+            KeyCode::Enter if self.focus == Focus::Functions && self.browser.is_some() => {
+                self.open_browser_selection()
+            }
             KeyCode::Enter => match self.focus {
                 Focus::Functions => match self.left {
                     LeftView::Sinks => self.open_sink(),
@@ -1848,6 +1986,12 @@ impl App {
     }
 
     fn step(&mut self, delta: isize) {
+        if self.focus == Focus::Functions {
+            if let Some(browser) = &mut self.browser {
+                browser.step(delta);
+                return;
+            }
+        }
         match self.focus {
             Focus::Functions => match self.left {
                 LeftView::Functions => self.move_sel(delta),
@@ -1946,6 +2090,8 @@ impl App {
             return;
         }
         let input = match ask {
+            Ask::Command => String::new(),
+            Ask::Filter if self.browser.is_some() => self.browser.as_ref().unwrap().filter.clone(),
             Ask::Filter => match self.left {
                 LeftView::Driver => self.dsrch.clone(),
                 LeftView::Types => self.tysrch.clone(),
@@ -2015,68 +2161,51 @@ impl App {
     /// the last frame. The layout mirrors `render::draw`, kept in one place so
     /// the two cannot disagree.
     pub fn pane_at(&self, column: u16, row: u16) -> Option<(Focus, usize)> {
-        let (w, h) = self.dims;
-        if w == 0 || h == 0 {
-            return None;
-        }
-        // header at row 0, footer at h-1; body is rows 1..h-2.
-        if row < 1 || row >= h.saturating_sub(1) {
-            return None;
-        }
-        let body_h = h.saturating_sub(2);
-        let fns_w = 38.min(w);
-        let evidence_h = match self.left {
-            LeftView::Sinks if !self.sinks.is_empty() => 6u16.min(body_h),
-            LeftView::Types => 7u16.min(body_h),
-            _ => 0,
-        };
-        let xrefs_h = if evidence_h > 0 { 7 } else { 8 }.min(body_h);
-        let body_bottom = h.saturating_sub(1);
-        let xrefs_start = body_bottom.saturating_sub(xrefs_h);
-        let evidence_start = xrefs_start.saturating_sub(evidence_h);
-        let left_len = match self.left {
-            LeftView::Functions => self.order.len(),
-            LeftView::Sinks => self.sinks.len(),
-            LeftView::Driver => self.driver_rows().len(),
-            LeftView::Types => self.type_rows().len(),
-        };
-        let (focus, list_len, pane_row) = if column < fns_w {
-            (Focus::Functions, left_len, row)
-        } else if row >= xrefs_start {
+        let panes = self.panes(ratatui::layout::Rect::new(0, 0, self.dims.0, self.dims.1));
+        let point = ratatui::layout::Position::new(column, row);
+        let (focus, area, len, selection) = if panes.functions.contains(point) {
+            let (len, selection) = match self.left {
+                LeftView::Functions => (self.order.len(), self.sel),
+                LeftView::Sinks => (self.sinks.len(), self.ssel),
+                LeftView::Driver => (self.driver_rows().len(), self.dsel),
+                LeftView::Types => (self.type_rows().len(), self.tsel),
+            };
+            (Focus::Functions, panes.functions, len, selection)
+        } else if panes.references.contains(point) {
             (
                 Focus::Xrefs,
+                panes.references,
                 self.xref_rows().len(),
-                row.saturating_sub(xrefs_start),
+                self.xsel,
             )
-        } else if evidence_h > 0 && row >= evidence_start {
-            // The evidence rail describes the selected attack-surface row. It
-            // has no independent cursor; clicking it must not move another pane.
-            return None;
+        } else if panes.listing.contains(point) {
+            (
+                Focus::Listing,
+                panes.listing,
+                self.listing_len(),
+                self.cursor,
+            )
         } else {
-            (Focus::Listing, self.listing_len(), row)
+            return None;
         };
-        // row 0 of the pane is the border, row 1 the title; items start there.
-        let mut idx = pane_row.saturating_sub(2) as usize;
+        let inner = area.inner(ratatui::layout::Margin::new(1, 1));
+        if !inner.contains(point) {
+            return None;
+        }
+        let mut idx = usize::from(row - inner.y)
+            + selection.saturating_sub(usize::from(inner.height).saturating_sub(1));
         if focus == Focus::Listing && self.graph {
-            let inner_width = w.saturating_sub(fns_w).saturating_sub(2);
-            let listing_height = evidence_start.saturating_sub(1);
-            let inner_height = listing_height.saturating_sub(2);
-            let inspector_height = if inner_height >= 9 { 6 } else { 0 };
-            let map_height = inner_height.saturating_sub(inspector_height);
-            let graph_x = column.saturating_sub(fns_w).saturating_sub(1);
-            let graph_y = row.saturating_sub(2);
+            let inspector_height = if inner.height >= 9 { 6 } else { 0 };
             idx = self
-                .graph_block_at_point(graph_x, graph_y, inner_width, map_height)
+                .graph_block_at_point(
+                    column - inner.x,
+                    row - inner.y,
+                    inner.width,
+                    inner.height.saturating_sub(inspector_height),
+                )
                 .unwrap_or(self.cursor);
         }
-        Some((
-            focus,
-            if list_len == 0 {
-                0
-            } else {
-                idx.min(list_len - 1)
-            },
-        ))
+        Some((focus, idx.min(len.saturating_sub(1))))
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -2088,6 +2217,21 @@ impl App {
                     return;
                 };
                 self.focus = focus;
+                if focus == Focus::Functions && self.browser.is_some() {
+                    if let Some(browser) = &mut self.browser {
+                        let height = usize::from(self.dims.1.saturating_sub(4))
+                            .div_ceil(2)
+                            .max(1);
+                        let start = browser
+                            .selection
+                            .saturating_sub(height / 2)
+                            .min(browser.visible.len().saturating_sub(height));
+                        browser.selection = (start + usize::from(m.row.saturating_sub(2)) / 2)
+                            .min(browser.visible.len().saturating_sub(1));
+                    }
+                    self.open_browser_selection();
+                    return;
+                }
                 match focus {
                     Focus::Functions => match self.left {
                         LeftView::Sinks => {
@@ -2130,13 +2274,6 @@ fn push_type_group(rows: &mut Vec<TyRow>, title: &str, mut group: Vec<TyRow>) {
         section: true,
     });
     rows.append(&mut group);
-}
-
-fn parse_addr(s: &str) -> Option<u64> {
-    let t = s.trim();
-    t.strip_prefix("0x")
-        .or_else(|| t.strip_prefix("0X"))
-        .and_then(|h| u64::from_str_radix(h, 16).ok())
 }
 
 fn format_bytes(bytes: &[u8]) -> String {
@@ -2316,14 +2453,11 @@ fn parse_prototype(text: &str) -> Result<(String, Vec<String>), String> {
 
 /// Run the interactive view until the user quits.
 ///
-/// The analysis runs on a worker thread while the splash plays, so opening a
-/// large binary shows the animation immediately instead of a frozen terminal;
+/// Analysis runs on a worker thread with an elapsed-time status, so opening a
+/// large binary leaves the terminal responsive;
 /// `q` / Esc / Ctrl-C quit even while it is still working.
 pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
-    // The worker recovers the functions, ranks the sinks, and builds the
-    // literal map. The main thread only renders, so the splash animates for
-    // exactly as long as the analysis takes, then the app takes over with the
-    // ready result.
+    // Keep initial analysis, string mapping and driver reporting off the UI thread.
     let (tx, rx) = std::sync::mpsc::channel::<WorkResult>();
     std::thread::spawn(move || {
         let an = engine::analyze(&bin, &bytes, crate::ANALYSIS_BUDGET, &db);
@@ -2335,6 +2469,11 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
                 .then(a.addr.cmp(&b.addr))
         });
         let strings = listing::string_map(&bin, &bytes, engine::display_base(&bin));
+        let driver = if crate::analysis::driver::plausibly_a_driver(&bin) {
+            Some(crate::analysis::driver::report(&bin, &bytes, &an, &strings))
+        } else {
+            None
+        };
         let _ = tx.send(WorkResult {
             bin,
             bytes,
@@ -2342,6 +2481,7 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
             an,
             sinks,
             strings,
+            driver,
         });
     });
 
@@ -2352,11 +2492,10 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot start the interactive view: {e}"))?;
     let _ = ratatui::crossterm::execute!(&mut stdout(), event::EnableMouseCapture);
 
-    // Phase 1: animate while the analysis runs. `Ok(None)` is a quit request.
-    let mut frame: u64 = 0;
+    // No invented percent complete: the worker does not expose work-unit counts.
+    let started = Instant::now();
     let ready: Result<Option<WorkResult>> = 'work: loop {
-        frame = frame.saturating_add(1);
-        if let Err(e) = term.draw(|f| splash::draw(f, f.area(), frame, true)) {
+        if let Err(e) = term.draw(|f| render::loading(f, &title, started.elapsed().as_secs())) {
             break 'work Err(e.into());
         }
         match rx.try_recv() {
@@ -2366,7 +2505,7 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
-        match event::poll(Duration::from_millis(33)) {
+        match event::poll(Duration::from_millis(200)) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(k)) => {
                     let quit = k.kind == KeyEventKind::Press
@@ -2392,6 +2531,7 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
         an,
         sinks,
         strings,
+        driver,
     } = match ready {
         Ok(Some(ready)) => ready,
         Ok(None) => {
@@ -2411,42 +2551,20 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
         anyhow::bail!("no functions were recovered, so there is nothing to browse");
     }
 
-    // The heavy work is done; the splash replays from the top and any key skips
-    // the rest of it. The tick stays fast while the splash plays and relaxes
-    // once it is gone: an idle TUI at 30fps only burns CPU for the spinner.
-    let driver = if crate::analysis::driver::plausibly_a_driver(&bin) {
-        Some(crate::analysis::driver::report(&bin, &bytes, &an, &strings))
-    } else {
-        None
-    };
+    // Open the usable workspace immediately. No intro replay or idle animation.
     let mut app = App::new(bin, bytes, db, an, sinks, strings, driver, title);
     let res = loop {
-        app.frame = app.frame.saturating_add(1);
-        if app.splash && app.frame > splash::SPLASH_FRAMES {
-            app.splash = false;
-        }
         if let Ok(area) = term.size() {
             app.dims = (area.width, area.height);
         }
         if let Err(e) = term.draw(|f| render::draw(f, &app)) {
             break Err(e.into());
         }
-        // Poll with a short timeout instead of blocking on read: a tick with no
-        // input redraws, which is what makes the splash and the header spinner
-        // move without keys.
-        let tick = if app.splash {
-            Duration::from_millis(33)
-        } else {
-            Duration::from_millis(150)
-        };
-        match event::poll(tick) {
-            Ok(true) => match event::read() {
-                Ok(Event::Key(k)) => app.on_key(k),
-                Ok(Event::Mouse(m)) => app.on_mouse(m),
-                Ok(_) => {}
-                Err(e) => break Err(e.into()),
-            },
-            Ok(false) => {}
+        // No background work remains: block until input/resize instead of redrawing idle frames.
+        match event::read() {
+            Ok(Event::Key(k)) => app.on_key(k),
+            Ok(Event::Mouse(m)) => app.on_mouse(m),
+            Ok(_) => {}
             Err(e) => break Err(e.into()),
         }
         if app.quit {
@@ -2595,6 +2713,357 @@ mod tests {
         app.back();
         assert_eq!(app.cur, Some(0x1000), "and came back");
         assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn navigation_restores_view_and_forward_branch() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.toggle_pseudo();
+        app.focus = Focus::Xrefs;
+        app.cursor = app.listing_len().saturating_sub(1);
+        let origin = app.navigation_location().unwrap();
+        app.open(0x100b, true);
+        app.toggle_pseudo();
+        app.toggle_graph();
+        app.focus = Focus::Listing;
+        let destination = app.navigation_location().unwrap();
+        app.back();
+        assert_eq!(app.navigation_location().unwrap(), origin);
+        app.forward();
+        assert_eq!(app.navigation_location().unwrap(), destination);
+        app.back();
+        app.open(0x100b, true);
+        assert!(
+            app.future.is_empty(),
+            "new navigation replaces forward branch"
+        );
+    }
+
+    #[test]
+    fn command_prompt_executes_completes_and_recalls() {
+        let mut app = two_functions();
+        app.splash = false;
+        app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        for ch in "function 100b".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.cur, Some(0x100b));
+        assert_eq!(app.focus, Focus::Listing);
+        app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.prompt.as_ref().unwrap().input, "function 100b");
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        for ch in "de".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.prompt.as_ref().unwrap().input, "decompile ");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pseudo);
+        app.execute_command("disasm");
+        assert!(!app.pseudo && !app.graph);
+        app.execute_command("cfg");
+        assert!(app.graph);
+        app.execute_command("unsupported");
+        assert!(app.status.contains("unknown command"));
+    }
+
+    #[test]
+    fn references_keep_the_selected_address_when_focus_changes() {
+        let mut app = two_functions();
+        app.splash = false;
+        app.open(0x1000, false);
+        app.focus = Focus::Listing;
+        app.cursor = app.lines.len().saturating_sub(1);
+        let address = app.cursor_addr().unwrap();
+        app.execute_command("xrefs");
+        assert_eq!(app.focus, Focus::Xrefs);
+        assert_eq!(app.xref_at(), address);
+        app.open(0x100b, true);
+        app.back();
+        assert_eq!(app.xref_at(), address);
+    }
+
+    #[test]
+    fn catalog_commands_share_queries_filter_and_navigate() {
+        let mut app = two_functions();
+        app.an.imports.insert(0x100b, "test!ReadPacket".into());
+        let expected =
+            crate::api::symbols::imports_in(&app.an, &crate::api::symbols::SymbolQuery::default());
+        app.execute_command("imports");
+        let browser = app.browser.as_ref().unwrap();
+        assert_eq!(browser.rows.len(), expected.len());
+        assert_eq!(browser.rows[0].address, expected[0].address);
+        app.set_filter("READPACKET".into());
+        assert_eq!(app.browser.as_ref().unwrap().visible.len(), 1);
+        app.open_browser_selection();
+        assert_eq!(app.cur, Some(0x100b));
+        app.execute_command("functions");
+        assert!(app.browser.is_none());
+        app.strings.insert(
+            0x1000,
+            Located {
+                off: 0x1000,
+                text: "packet header".into(),
+                wide: false,
+                len: 13,
+            },
+        );
+        app.execute_command("strings");
+        assert!(rendered(&mut app, 110, 30).contains("packet header"));
+        let browser = app.browser.as_ref().unwrap();
+        assert_eq!(
+            browser.rows[0].file_offset,
+            Some(crate::address::FileOffset(0x1000))
+        );
+        app.set_filter("not present".into());
+        app.step(1);
+        assert!(app.browser.as_ref().unwrap().visible.is_empty());
+        app.open_browser_selection();
+        assert!(app.status.contains("no catalog row"));
+    }
+
+    #[test]
+    fn bookmark_commands_keep_user_notes_and_navigate() {
+        let mut app = two_functions();
+        app.open(0x100b, false);
+        app.focus = Focus::Listing;
+        app.execute_command("comment review caller");
+        app.execute_command("bookmark");
+        assert!(app.db.bookmarks.contains(&0x100b));
+        app.open(0x1000, true);
+        app.execute_command("bookmarks");
+        assert_eq!(app.browser.as_ref().unwrap().visible.len(), 1);
+        app.open_browser_selection();
+        assert_eq!(app.cur, Some(0x100b));
+        app.execute_command("bookmark");
+        assert!(app.db.bookmarks.is_empty());
+        assert_eq!(app.db.notes.get(&0x100b).unwrap(), "review caller");
+    }
+
+    #[test]
+    fn section_catalog_matches_shared_query_and_opens_code() {
+        let mut app = two_functions();
+        let sections = crate::api::binary_summary::sections(&app.bin);
+        app.execute_command("sections");
+        let browser = app.browser.as_ref().unwrap();
+        assert_eq!(browser.rows.len(), sections.len());
+        assert_eq!(browser.rows[0].address, sections[0].static_address);
+        assert_eq!(browser.rows[0].file_offset, Some(sections[0].file_offset));
+        app.open_browser_selection();
+        assert_eq!(app.cur, Some(0x1000));
+    }
+
+    #[test]
+    fn shared_selector_keeps_interior_addresses_and_prefers_symbols() {
+        let mut app = two_functions();
+        app.an.names.insert(0x100b, "1000".into());
+        let address = crate::api::navigation::resolve_address_in(&app.an, "1000").unwrap();
+        assert_eq!(address.get(), 0x100b);
+        app.execute_command("goto 0x1001");
+        assert_eq!(
+            crate::api::navigation::resolve_address_in(&app.an, "0x1001")
+                .unwrap()
+                .get(),
+            0x1001
+        );
+        assert!(
+            crate::api::navigation::resolve_address_in(&app.an, "184467440737095516160").is_err()
+        );
+        assert!(crate::api::navigation::resolve_address_in(&app.an, "0x0x1000").is_err());
+    }
+
+    #[test]
+    fn failed_jump_preserves_forward_history() {
+        let mut app = two_functions();
+        app.open(0x100b, true);
+        app.back();
+        let future = app.future.clone();
+        app.open(0xdeadbeef, true);
+        assert_eq!(app.future, future);
+        app.forward();
+        assert_eq!(app.cur, Some(0x100b));
+    }
+
+    #[test]
+    fn adaptive_panes_share_hit_testing_and_keyboard_controls() {
+        use ratatui::layout::Rect;
+        let mut app = two_functions();
+        for (width, height) in [(100, 30), (160, 40)] {
+            app.dims = (width, height);
+            let panes = app.panes(Rect::new(0, 0, width, height));
+            assert_eq!(
+                app.pane_at(panes.listing.x + 1, panes.listing.y + 1)
+                    .unwrap()
+                    .0,
+                Focus::Listing
+            );
+            assert_eq!(
+                app.pane_at(panes.references.x + 1, panes.references.y + 1)
+                    .unwrap()
+                    .0,
+                Focus::Xrefs
+            );
+            if width >= 132 {
+                assert!(panes.references.x > panes.listing.x);
+                assert_eq!(panes.references.y, panes.listing.y);
+            } else {
+                assert!(panes.references.y > panes.listing.y);
+            }
+            assert!(app.pane_at(width, height).is_none());
+            assert!(app.pane_at(0, 0).is_none());
+        }
+        app.execute_command("focus functions");
+        let before = app.pane_settings.left_width;
+        app.execute_command("widen");
+        assert_eq!(app.pane_settings.left_width, before + 4);
+        app.execute_command("close");
+        assert_eq!(app.focus, Focus::Listing);
+        assert_eq!(app.panes(Rect::new(0, 0, 160, 40)).functions.width, 0);
+        app.execute_command("focus functions");
+        assert!(app.panes(Rect::new(0, 0, 160, 40)).functions.width > 0);
+        app.execute_command("focus references");
+        app.execute_command("close");
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.focus,
+            Focus::Listing,
+            "Tab skips both closed side panes"
+        );
+        app.execute_command("focus references");
+        app.execute_command("narrow");
+        assert_eq!(app.pane_settings.reference_width, 28);
+        app.execute_command("focus listing");
+        app.execute_command("close");
+        assert!(app.status.contains("listing stays open"));
+    }
+
+    #[test]
+    fn catalog_jump_preserves_the_source_pseudocode_view_in_history() {
+        let mut app = data_ref_app();
+        app.toggle_pseudo();
+        app.cursor = app.pseudo_lines.len() - 1;
+        app.execute_command("sections");
+        let origin = app.navigation_location().unwrap();
+        app.browser.as_mut().unwrap().selection = 1;
+        app.open_browser_selection();
+        assert_eq!(app.cur, Some(0x101c));
+        assert!(!app.pseudo);
+        app.back();
+        assert_eq!(app.navigation_location().unwrap(), origin);
+    }
+
+    #[test]
+    fn adjacent_function_commands_are_ordered_bounded_and_reversible() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.execute_command("previous");
+        assert_eq!(app.cur, Some(0x1000));
+        assert!(app.history.is_empty());
+        assert!(app.status.contains("no previous"));
+        app.execute_command("next");
+        assert_eq!(app.cur, Some(0x100b));
+        let history_len = app.history.len();
+        app.execute_command("next");
+        assert_eq!(app.history.len(), history_len);
+        assert!(app.status.contains("no next"));
+        app.execute_command("previous");
+        assert_eq!(app.cur, Some(0x1000));
+        app.back();
+        assert_eq!(app.cur, Some(0x100b));
+        assert_eq!(
+            crate::api::navigation::adjacent_function(
+                &app.an,
+                crate::address::StaticVa(0x1001),
+                true
+            ),
+            Some(crate::address::StaticVa(0x100b))
+        );
+    }
+
+    #[test]
+    fn history_catalog_filters_and_restores_saved_view_not_just_address() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.focus = Focus::Listing;
+        app.toggle_pseudo();
+        app.cursor = app.pseudo_lines.len() - 1;
+        let origin = app.navigation_location().unwrap();
+        app.open(0x100b, true);
+        app.execute_command("history");
+        let browser = app.browser.as_mut().unwrap();
+        assert_eq!(browser.rows.len(), 1);
+        browser.filter("PAST PSEUDOCODE".into());
+        assert_eq!(browser.visible.len(), 1);
+        app.open_browser_selection();
+        assert_eq!(app.navigation_location().unwrap(), origin);
+        app.back();
+        assert_eq!(app.cur, Some(0x100b));
+        app.execute_command("history");
+        assert!(app
+            .browser
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.detail.starts_with("FORWARD")));
+        app.browser
+            .as_mut()
+            .unwrap()
+            .filter("does not exist".into());
+        app.open_browser_selection();
+        assert!(app.status.contains("no catalog row"));
+    }
+
+    #[test]
+    fn view_switching_preserves_independent_positions_through_history() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.cursor = app.lines.len() - 1;
+        let assembly_cursor = app.cursor;
+        app.toggle_pseudo();
+        app.cursor = app.pseudo_lines.len() - 1;
+        let pseudo_cursor = app.cursor;
+        app.toggle_pseudo();
+        assert_eq!(app.cursor, assembly_cursor);
+        app.toggle_pseudo();
+        assert_eq!(app.cursor, pseudo_cursor);
+        app.open(0x100b, true);
+        assert_eq!(
+            app.cursor, 0,
+            "new function has independent pseudocode position"
+        );
+        app.back();
+        assert_eq!(app.cursor, pseudo_cursor);
+        app.toggle_pseudo();
+        assert_eq!(app.cursor, assembly_cursor);
+        app.toggle_graph();
+        app.toggle_pseudo();
+        assert_eq!(app.cursor, pseudo_cursor);
+    }
+
+    #[test]
+    fn graph_switching_correlates_the_selected_basic_block() {
+        // test eax,eax; je 1005; ret; ret
+        let mut app = app_with(&[0x85, 0xc0, 0x74, 0x01, 0xc3, 0xc3], 0x1000);
+        app.open(0x1005, false);
+        app.toggle_graph();
+        assert_eq!(
+            app.current_function().unwrap().blocks[app.cursor].start,
+            0x1005
+        );
+        app.cursor = app
+            .current_function()
+            .unwrap()
+            .blocks
+            .iter()
+            .position(|block| block.start == 0x1004)
+            .unwrap();
+        app.toggle_graph();
+        assert!(!app.graph);
+        assert_eq!(app.lines[app.cursor].addr(), 0x1004);
     }
 
     #[test]
@@ -3107,6 +3576,66 @@ mod tests {
     }
 
     #[test]
+    fn call_queries_keep_sites_and_do_not_promote_branches_or_data() {
+        use crate::address::StaticVa;
+        use crate::analysis::engine::{Ref, Xref, XrefKind};
+        use crate::api::references::{query_in, ReferenceView};
+        let mut app = two_functions();
+        // The call target also appears in a non-call operand. It must not be
+        // promoted merely because the function has a real call to this target.
+        app.an.xrefs_from.entry(0x1005).or_default().extend([
+            Ref {
+                to: 0x100b,
+                kind: XrefKind::Branch,
+            },
+            Ref {
+                to: 0x100b,
+                kind: XrefKind::Data,
+            },
+        ]);
+        app.an.xrefs_to.entry(0x100b).or_default().extend([
+            Xref {
+                from: 0x1005,
+                kind: XrefKind::Branch,
+            },
+            Xref {
+                from: 0x1005,
+                kind: XrefKind::Data,
+            },
+        ]);
+        let calls = query_in(&app.an, StaticVa(0x1000), ReferenceView::Callees);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].source, StaticVa(0x1000));
+        assert_eq!(calls[0].target, StaticVa(0x100b));
+        assert_eq!(calls[0].kind, XrefKind::Call);
+        app.open(0x1000, false);
+        app.lines.clear(); // Call results must not depend on rendered listing rows.
+        app.execute_command("callees");
+        assert_eq!(app.xref_rows()[0].site, calls[0].source.get());
+        app.open(0x100b, false);
+        app.execute_command("callers");
+        assert_eq!(app.refview, RefView::Callers);
+        assert_eq!(app.xref_rows().len(), 1);
+        assert_eq!(app.xref_rows()[0].jump, 0x1000);
+        assert_eq!(
+            query_in(&app.an, StaticVa(0x100b), ReferenceView::Xrefs).len(),
+            3
+        );
+        // Recovered tail-call jumps remain jumps, not ordinary calls.
+        app.an.xrefs_from.get_mut(&0x1000).unwrap()[0].kind = XrefKind::Jump;
+        app.an.xrefs_to.get_mut(&0x100b).unwrap()[0].kind = XrefKind::Jump;
+        assert_eq!(
+            query_in(&app.an, StaticVa(0x1000), ReferenceView::Callees)[0].kind,
+            XrefKind::Jump
+        );
+        assert_eq!(
+            query_in(&app.an, StaticVa(0x100b), ReferenceView::Callers)[0].kind,
+            XrefKind::Jump
+        );
+        assert!(query_in(&app.an, StaticVa(0xffff), ReferenceView::Callees).is_empty());
+    }
+
+    #[test]
     fn the_reference_pane_toggles_callers_and_callees() {
         let mut app = two_functions();
         app.focus = Focus::Listing;
@@ -3206,6 +3735,48 @@ mod tests {
     }
 
     #[test]
+    fn annotation_clearing_preserves_other_field_after_reload() {
+        let root =
+            std::env::temp_dir().join(format!("knife-tui-annotation-clear-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for clear_name in [true, false] {
+            let path = root.join(if clear_name { "name.json" } else { "note.json" });
+            let mut app = two_functions();
+            app.db = Db::load("annotation-test", "fixture", path.to_str()).unwrap();
+            app.open(0x100b, false);
+            app.commit(Ask::Name, 0x100b, "parse_header".into());
+            app.commit(Ask::Note, 0x100b, "check the length".into());
+
+            // Repeat the clear: an absent field must not erase its sibling either.
+            for _ in 0..2 {
+                app.commit(
+                    if clear_name { Ask::Name } else { Ask::Note },
+                    0x100b,
+                    String::new(),
+                );
+                let saved = Db::load("annotation-test", "fixture", path.to_str()).unwrap();
+                let expected_name = if clear_name {
+                    None
+                } else {
+                    Some("parse_header")
+                };
+                let expected_note = if clear_name {
+                    Some("check the length")
+                } else {
+                    None
+                };
+                assert_eq!(app.db.names.get(&0x100b).map(String::as_str), expected_name);
+                assert_eq!(app.db.notes.get(&0x100b).map(String::as_str), expected_note);
+                assert_eq!(saved.names.get(&0x100b).map(String::as_str), expected_name);
+                assert_eq!(saved.notes.get(&0x100b).map(String::as_str), expected_note);
+                assert_eq!(app.an.label(0x100b), expected_name.unwrap_or("sub_100b"));
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn goto_accepts_a_symbol_or_an_address() {
         let mut app = two_functions();
         app.commit(Ask::Goto, 0, "0x100b".into());
@@ -3230,10 +3801,38 @@ mod tests {
         );
     }
 
-    /// Draw the whole interface into an off-screen buffer and return its text.
-    /// This is the only automated check that rendering does not panic, which
-    /// matters because a layout mistake shows up as a crash, not a wrong pixel.
-    /// The splash is turned off so these tests exercise the main view.
+    #[test]
+    fn reverse_focus_cycles_only_visible_panes_without_navigation() {
+        for functions in [false, true] {
+            for references in [false, true] {
+                let mut app = two_functions();
+                app.pane_settings.functions = functions;
+                app.pane_settings.references = references;
+                let current = app.cur;
+                let mut visible = vec![Focus::Listing];
+                if functions {
+                    visible.push(Focus::Functions);
+                }
+                if references {
+                    visible.push(Focus::Xrefs);
+                }
+                for focus in &visible {
+                    app.focus = *focus;
+                    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                    assert!(visible.contains(&app.focus));
+                    app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+                    assert_eq!(app.focus, *focus);
+                    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+                    assert!(visible.contains(&app.focus));
+                    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                    assert_eq!(app.focus, *focus);
+                    assert_eq!(app.cur, current);
+                }
+            }
+        }
+    }
+
+    /// Draw the main interface into an off-screen buffer for render assertions.
     fn rendered(app: &mut App, w: u16, h: u16) -> String {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -3255,7 +3854,11 @@ mod tests {
         assert!(out.contains("functions"), "the function list is drawn");
         assert!(out.contains("entry"), "and lists what was recovered");
         assert!(out.contains("xrefs"), "the xref pane is drawn");
-        assert!(out.contains("open/follow"), "the key hints are drawn");
+        assert!(
+            out.contains(": commands"),
+            "command mode stays discoverable"
+        );
+        assert!(out.contains("? help"), "help stays discoverable");
     }
 
     #[test]
@@ -3446,6 +4049,23 @@ mod tests {
     }
 
     #[test]
+    fn opening_data_from_pseudocode_clears_stale_view_and_back_restores_it() {
+        let mut app = data_ref_app();
+        app.toggle_pseudo();
+        app.cursor = app.pseudo_lines.len() - 1;
+        let origin = app.navigation_location().unwrap();
+        app.open(0x101c, true);
+        assert!(!app.pseudo);
+        assert!(!app.graph);
+        assert!(app.pseudo_lines.is_empty());
+        assert!(!app.lines.is_empty());
+        app.toggle_pseudo();
+        assert!(!app.pseudo, "unsupported view leaves data visible");
+        app.back();
+        assert_eq!(app.navigation_location().unwrap(), origin);
+    }
+
+    #[test]
     fn the_literal_is_annotated_in_the_listing() {
         let app = data_ref_app();
         assert!(
@@ -3566,14 +4186,34 @@ mod tests {
     }
 
     #[test]
-    fn any_key_dismisses_the_splash_without_acting_on_it() {
+    fn loading_status_is_honest_and_renders_in_small_terminals() {
+        use ratatui::{backend::TestBackend, Terminal};
+        for (width, height) in [(100, 12), (12, 4)] {
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            term.draw(|f| render::loading(f, "fixture.exe", 7)).unwrap();
+            let text = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(text.contains("KNIFE"));
+            if width == 100 {
+                assert!(text.contains("Elapsed: 7s"));
+                assert!(text.contains("progress total unavailable"));
+                assert!(text.contains("Ctrl+C: quit"));
+                assert!(!text.contains("press any key"));
+            }
+        }
+    }
+
+    #[test]
+    fn ready_workspace_handles_the_first_key_without_an_intro() {
         let mut app = two_functions();
-        assert!(app.splash, "a fresh app plays the splash");
-        // `q` would quit and `/` would open a prompt; the splash must swallow
-        // the first key so neither happens by accident.
+        assert!(!app.splash, "a ready workspace does not play an intro");
         app.on_key(KeyEvent::from(KeyCode::Char('q')));
-        assert!(!app.splash, "the splash swallowed the key");
-        assert!(!app.quit, "and the key did nothing else");
+        assert!(app.quit, "the first key is handled immediately");
         assert!(app.prompt.is_none());
     }
 }

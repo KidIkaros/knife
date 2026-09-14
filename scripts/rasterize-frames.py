@@ -29,8 +29,8 @@ except ImportError:  # optional: without it there is no glyph fallback
 
 # The interface's own canvas colour, used wherever a cell asks for the
 # terminal default (ratatui's `Color::Reset`).
-DEFAULT_BG = "#0b1016"
-DEFAULT_FG = "#a6adbb"
+DEFAULT_BG = "#000000"
+DEFAULT_FG = "#c0c0c0"
 
 # Monospace faces to try in order.  Cascadia Mono ships with Windows Terminal
 # and draws the box-drawing characters the panes are built from.

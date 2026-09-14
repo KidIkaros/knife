@@ -15,59 +15,68 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct KField {
     pub offset: u64,
+    pub width: u8,
     pub name: &'static str,
     pub ty: &'static str,
 }
 
 macro_rules! fields {
-    ($($off:expr, $name:literal, $ty:literal);+ $(;)?) => {{
-        &[ $( KField { offset: $off, name: $name, ty: $ty }, )+ ]
+    ($($off:expr, $width:expr, $name:literal, $ty:literal);+ $(;)?) => {{
+        &[ $( KField { offset: $off, width: $width, name: $name, ty: $ty }, )+ ]
     }};
 }
 
 /// x64 `_UNICODE_STRING`.
 #[allow(dead_code)] // deferred IR type-renaming
 pub static UNICODE_STRING: &[KField] = fields![
-    0x00, "Length", "u16";
-    0x02, "MaximumLength", "u16";
-    0x08, "Buffer", "PWSTR";
+    0x00, 2, "Length", "u16";
+    0x02, 2, "MaximumLength", "u16";
+    0x08, 8, "Buffer", "PWSTR";
 ];
 
-/// x64 `_DRIVER_OBJECT`. `MajorFunction` is the dispatch table: slot `n` at
-/// `MAJOR_BASE + 8*n`. The table has moved between kernels; both documented
-/// bases are kept so recovery accepts either.
+/// x64 `_LIST_ENTRY`, a public intrusive-list ABI primitive.
+pub static LIST_ENTRY: &[KField] = fields![
+    0x00, 8, "Flink", "PLIST_ENTRY";
+    0x08, 8, "Blink", "PLIST_ENTRY";
+];
+
+/// Public x64 `_DRIVER_OBJECT`. `MajorFunction` is the dispatch table: slot
+/// `n` at `0x70 + 8*n`; `0x50` is the distinct `FastIoDispatch` pointer.
 #[allow(dead_code)] // deferred IR type-renaming
 pub static DRIVER_OBJECT: &[KField] = fields![
-    0x00, "Type", "u16";
-    0x02, "Size", "u16";
-    0x08, "DeviceObject", "PDEVICE_OBJECT";
-    0x10, "RegistryPath", "UNICODE_STRING";
-    0x20, "DriverInit", "ptr";
-    0x28, "DriverStart", "ptr";
-    0x30, "DriverSize", "u32";
-    0x38, "DriverFlags", "u32";
-    0x40, "DriverStartIo", "ptr";
-    0x48, "DriverUnload", "ptr";
-    // MajorFunction[28] @ both known x64 bases.
-    0x50, "MajorFunction", "PDRIVER_DISPATCH[28]";
-    0x70, "MajorFunction", "PDRIVER_DISPATCH[28]";
+    0x00, 2, "Type", "u16";
+    0x02, 2, "Size", "u16";
+    0x08, 8, "DeviceObject", "PDEVICE_OBJECT";
+    0x10, 4, "Flags", "u32";
+    0x18, 8, "DriverStart", "ptr";
+    0x20, 4, "DriverSize", "u32";
+    0x28, 8, "DriverSection", "ptr";
+    0x30, 8, "DriverExtension", "PDRIVER_EXTENSION";
+    0x38, 16, "DriverName", "UNICODE_STRING";
+    0x48, 8, "HardwareDatabase", "PUNICODE_STRING";
+    0x50, 8, "FastIoDispatch", "PFAST_IO_DISPATCH";
+    0x58, 8, "DriverInit", "PDRIVER_INITIALIZE";
+    0x60, 8, "DriverStartIo", "PDRIVER_STARTIO";
+    0x68, 8, "DriverUnload", "PDRIVER_UNLOAD";
+    0x70, 224, "MajorFunction", "PDRIVER_DISPATCH[28]";
 ];
 
 /// x64 `_IO_STACK_LOCATION`, `Parameters` union at 0x08; the
 /// `DeviceIoControl` member is what a dispatch handler reads.
 pub static IO_STACK_LOCATION: &[KField] = fields![
-    0x00, "MajorFunction", "u8";
-    0x01, "MinorFunction", "u8";
-    0x02, "Flags", "u8";
-    0x03, "Control", "u8";
-    0x08, "Parameters.DeviceIoControl.OutputBufferLength", "u32";
-    0x0c, "Parameters.DeviceIoControl.InputBufferLength", "u32";
-    0x10, "Parameters.DeviceIoControl.IoControlCode", "u32";
-    0x18, "Parameters.DeviceIoControl.Type3InputBuffer", "ptr";
+    0x00, 1, "MajorFunction", "u8";
+    0x01, 1, "MinorFunction", "u8";
+    0x02, 1, "Flags", "u8";
+    0x03, 1, "Control", "u8";
+    0x08, 4, "Parameters.DeviceIoControl.OutputBufferLength", "u32";
+    0x0c, 4, "Parameters.DeviceIoControl.InputBufferLength", "u32";
+    0x10, 4, "Parameters.DeviceIoControl.IoControlCode", "u32";
+    0x18, 8, "Parameters.DeviceIoControl.Type3InputBuffer", "ptr";
 ];
 
-/// The `MajorFunction` table base for x64 (two historical locations).
-pub const MAJOR_BASES: [u64; 2] = [0x50, 0x70];
+/// The public `MajorFunction` table base for x64.
+pub const MAJOR_BASES: [u64; 1] = [0x70];
+pub const FAST_IO_DISPATCH_OFFSET: u64 = 0x50;
 
 /// Field lookup inside a known structure.
 pub fn field(ty: &'static [KField], offset: u64) -> Option<&'static KField> {
@@ -75,7 +84,7 @@ pub fn field(ty: &'static [KField], offset: u64) -> Option<&'static KField> {
 }
 
 /// Render a dispatch-table slot access as `MajorFunction[IRP_MJ_*]`.
-/// `offset` is interpreted against the modern (0x50) x64 base.
+/// `offset` is interpreted against the public x64 base.
 #[allow(dead_code)] // deferred IR type-renaming
 pub fn dispatch_slot(offset: u64) -> Option<String> {
     for base in MAJOR_BASES {
@@ -142,18 +151,13 @@ mod tests {
 
     #[test]
     fn dispatch_slots_render_by_major() {
-        // Modern base: IRP_MJ_DEVICE_CONTROL (14) at 0x50 + 8*14.
-        assert_eq!(
-            dispatch_slot(0x50 + 8 * 14),
-            Some("MajorFunction[14] /* IRP_MJ_DEVICE_CONTROL */".into())
-        );
-        // The same bytes read under the legacy interpretation (0x70 base).
-        // Dispatch slot naming defaults to the modern base, so this is slot 18
-        // unless a driver report already established 0x70 as its base.
+        // IRP_MJ_DEVICE_CONTROL (14) at the public x64 base.
         assert_eq!(
             dispatch_slot(0x70 + 8 * 14),
-            Some("MajorFunction[18] /* IRP_MJ_CLEANUP */".into())
+            Some("MajorFunction[14] /* IRP_MJ_DEVICE_CONTROL */".into())
         );
+        // 0x50 is FastIoDispatch, never MajorFunction[0].
+        assert_eq!(dispatch_slot(FAST_IO_DISPATCH_OFFSET), None);
         // A non-slot offset is None, never a name.
         assert_eq!(dispatch_slot(0x20), None);
     }

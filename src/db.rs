@@ -21,7 +21,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -172,6 +172,8 @@ struct OnDisk {
     file: String,
     #[serde(default)]
     entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bookmarks: Vec<String>,
     #[serde(default)]
     fields: Vec<FieldEntry>,
     #[serde(default)]
@@ -192,6 +194,8 @@ pub struct Db {
     pub names: BTreeMap<u64, String>,
     /// Base-relative address -> your note.
     pub notes: BTreeMap<u64, String>,
+    /// Analyst bookmarks, in the same base-relative space as names and notes.
+    pub bookmarks: BTreeSet<u64>,
     /// User type -> signed byte offset -> field definition.
     pub fields: BTreeMap<String, BTreeMap<i64, UserField>>,
     /// (base-relative function entry, IR base identity) -> user type.
@@ -209,6 +213,7 @@ impl Db {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
             && self.notes.is_empty()
+            && self.bookmarks.is_empty()
             && self.fields.is_empty()
             && self.bindings.is_empty()
             && self.variables.is_empty()
@@ -219,6 +224,7 @@ impl Db {
     pub fn len(&self) -> usize {
         self.names.len()
             + self.notes.len()
+            + self.bookmarks.len()
             + self.fields.values().map(BTreeMap::len).sum::<usize>()
             + self.bindings.len()
             + self.variables.len()
@@ -249,8 +255,13 @@ impl Db {
             ..Default::default()
         };
 
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Ok(db);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(db),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read annotation database {}", path.display()))
+            }
         };
         let disk: OnDisk = serde_json::from_str(&text)
             .with_context(|| format!("{} is not a valid knife database", path.display()))?;
@@ -266,6 +277,11 @@ impl Db {
             );
         }
 
+        for address in disk.bookmarks {
+            let address = parse_hex(&address)
+                .with_context(|| format!("invalid bookmark address in {}", path.display()))?;
+            db.bookmarks.insert(address);
+        }
         for e in disk.entries {
             let Some(at) = parse_hex(&e.at) else { continue };
             if !e.name.is_empty() {
@@ -755,6 +771,11 @@ impl Db {
         let disk = OnDisk {
             sha256: self.sha256.clone(),
             file: self.file.clone(),
+            bookmarks: self
+                .bookmarks
+                .iter()
+                .map(|address| format!("0x{address:x}"))
+                .collect(),
             entries: addrs
                 .into_iter()
                 .map(|at| Entry {
@@ -1044,6 +1065,55 @@ mod tests {
             Some("length is attacker controlled")
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn bookmarks_round_trip_without_overwriting_notes_and_reject_invalid_addresses() {
+        let path = tmp_path("bookmarks");
+        let mut db = Db::load("bookmark-hash", "fixture.exe", path.to_str()).unwrap();
+        db.bookmarks.insert(0x2000);
+        db.set_note(0x2000, "review this path");
+        db.save().unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("0x2000"));
+        let reloaded = Db::load("bookmark-hash", "fixture.exe", path.to_str()).unwrap();
+        assert!(reloaded.bookmarks.contains(&0x2000));
+        assert_eq!(reloaded.notes.get(&0x2000).unwrap(), "review this path");
+        let legacy: OnDisk =
+            serde_json::from_str(r#"{"sha256":"bookmark-hash","entries":[]}"#).unwrap();
+        assert!(legacy.bookmarks.is_empty());
+        std::fs::write(
+            &path,
+            r#"{"sha256":"bookmark-hash","bookmarks":["not-an-address"]}"#,
+        )
+        .unwrap();
+        assert!(Db::load("bookmark-hash", "fixture.exe", path.to_str()).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bookmark_query_checks_address_spaces_and_rolls_back_failed_save() {
+        let mut binary =
+            crate::model::Binary::stub(crate::model::Format::Pe, crate::model::Arch::X86_64);
+        binary.image_base = 0x140000000;
+        let mut db = Db::default();
+        let address = crate::address::StaticVa(0x140002000);
+        crate::api::bookmarks::set(&binary, &mut db, address, true).unwrap();
+        assert!(db.bookmarks.contains(&0x2000));
+        assert_eq!(
+            crate::api::bookmarks::list(&binary, &db).unwrap()[0].address,
+            address
+        );
+        assert!(
+            crate::api::bookmarks::set(&binary, &mut db, crate::address::StaticVa(1), true)
+                .is_err()
+        );
+        let parent = tmp_path("bookmark-save-failure");
+        std::fs::write(&parent, "not a directory").unwrap();
+        db.path = Some(parent.join("workspace.json"));
+        assert!(crate::api::bookmarks::set(&binary, &mut db, address, false).is_err());
+        assert!(db.bookmarks.contains(&0x2000));
+        std::fs::remove_file(parent).unwrap();
     }
 
     #[test]

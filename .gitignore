@@ -3,8 +3,24 @@ dist
 staging
 *.bak
 
-# knife-gui (Tauri desktop app)
-knife-gui/node_modules
-knife-gui/dist
-knife-gui/src-tauri/gen
-knife-gui/src-tauri/target
+# Private credentials and local provider configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Knife Research workspace state and sensitive research artifacts
+.knife-research/
+knife-research-data/
+research-workspaces/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.dmp
+*.mdmp
+*.core
+prompts/private/
