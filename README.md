@@ -13,88 +13,18 @@ binary. Static only: it reads the bytes on disk and never runs the target.
 ![platforms](https://img.shields.io/badge/platform-linux%20%C2%B7%20macos%20%C2%B7%20windows-informational)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white&logoWidth=20)](https://discord.gg/hU5NYVfzd)
 
-<img src="assets/demo.gif" width="990" alt="knife TUI: function navigation, strings, sections, imports, and history">
+<img src="assets/demo.gif" width="990" alt="knife TUI: function navigation, strings, split-view comparison, and history">
 
 [Watch the MP4 demo](assets/demo.mp4)
 
 </div>
 
-## Active development direction
+## Why
 
-Knife is a terminal-first reverse-engineering toolkit. Its active product is the
-deterministic core analysis engine, CLI, TUI and MCP interface. The TUI is the
-primary interactive surface. Desktop GUI components are not part of the active
-build; the engine is shared by terminal and automation interfaces.
-
-```powershell
-cargo run --bin knife -- tui path\to\target.exe
-```
-
-In the TUI, `?` shows help and `:` opens command mode. Use `:function NAME`,
-`:goto 0xADDRESS`, `:disasm`, `:decompile`, `:cfg`, `:rename NAME`, and `:comment TEXT`.
-The interface uses a monochrome, square-bordered debugger theme. The active pane
-has a white title strip and `>` marker; Tab / Shift+Tab cycle visible panes in
-either direction. Compact footer hints keep command mode and help discoverable.
-Startup shows elapsed analysis time, not a guessed completion percentage. The
-workspace opens immediately when ready; there is no intro replay or idle spinner.
-Driver-report preparation runs on the startup worker with the other analysis.
-`:imports`, `:exports` and `:strings` open filterable catalogs; `/` filters and Enter
-opens the selected static address. Static VA and file offset are labeled separately.
-`:sections` browses section locations. `b` or `:bookmark` toggles a local bookmark;
-`:bookmarks` lists saved locations. Bookmarks live with names/comments in the existing
-hash-keyed annotation JSON and do not require a research database or model provider.
-Tab completes command names; Up/Down recalls commands. Backspace or Alt+Left returns;
-Alt+Right moves forward. Names take precedence over hexadecimal static addresses.
-`:goto` accepts explicit address modes: `off:0xOFFSET` (alias `file:`) converts a
-file offset through the section table, and `va:0xADDRESS` pins a value to the
-static-VA space when a symbol shares the text.
-`:reload` re-reads the target from disk and re-analyses it on a background
-worker, so a packer run or a rebuilt sample lands without restarting the
-session. Pane layout, filters and bookmarks survive; navigation into the old
-image does not. Annotations follow content identity: an unchanged file reloads
-into the same database, a changed file starts a fresh one, and a failed reload
-keeps the old session untouched.
-A target with no recovered functions is no longer refused: the workspace opens
-on the first mapped bytes and the section, string and import catalogs stay
-available. Tiny terminals get a resize notice instead of clipped fragments.
-`:split` clones the listing into a second column and `:compare F` pins a
-function there, so two functions sit side by side while the active pane keeps
-roaming. Tab walks between the columns; each keeps its own cursor, view mode
-and back/forward history, and `:only` (or `:close` on the listing) collapses
-back to one. The references pane hides while split.
-Running `knife` with no arguments opens a file explorer instead of a usage
-screen: directories first, PE/ELF/Mach-O badges sniffed from the magic bytes,
-`/` filters by name, and Enter hands the file to the workspace. Quitting the
-workspace returns to the explorer in the same directory, so a folder of
-samples is one keypress per file. `knife tui` without a file and
-`knife <directory>` do the same.
-`:next` and `:previous` open adjacent recovered functions in static-address order,
-without wrapping or changing the function filter. `:history` browses past/forward
-locations; `/` filters and Enter restores the saved view/cursor as a new navigation
-branch. Backspace returns from that jump.
-`:focus functions|listing|references` focuses/reveals a pane. `:close` closes the
-focused side pane; `:widen`/`:narrow` adjust its width. Tab skips closed side panes.
-Wide terminals show references beside the listing; narrower terminals put them
-below it. Pane settings currently last for the running session only.
-Disassembly and pseudocode retain separate cursor positions while switching and
-through back/forward history. CFG switching selects the block containing the last
-assembly position; switching back lands at the selected block's start. This does
-not imply instruction-level pseudocode correlation.
-`:xrefs` shows references to the cursor; `:callers` and `:callees` show the current
-function's recovered call sites. Tail-call jumps retain their jump classification;
-data operands and conditional branches are not promoted to calls. Empty results do
-not establish unreachability. The CLI uses the same call-site query:
-
-```powershell
-cargo run --bin knife -- callers target.exe --function SYMBOL
-cargo run --bin knife -- callees target.exe --function 0x140001000 --json
-```
-
-The [terminal milestone plan](docs/terminal-workstation-plan.md) defines the
-cleanup scope and the review boundary before TUI stabilization.
-
-Most tools tell you a binary imports `memcpy`. `knife` reads the call sites and
-tells you which one takes its length from a subtraction:
+Five tools become one: headers, strings and IOCs, imports, entropy,
+disassembly — plus the step they all leave to you. Most tools tell you a binary
+imports `memcpy`. `knife` reads the call sites and tells you which one takes
+its length from a subtraction:
 
 ```text
 $ knife sec 7z.dll
@@ -107,28 +37,13 @@ $ knife audit 7z.dll
   § AUDIT (145 FINDINGS)
   [-] copy-underflow   memcpy  sub_1000a6b4     @ 0x1000a72a
       copy length computed by subtraction (integer underflow to a huge size?)
-  [-] copy-underflow   memset  sub_1000b028     @ 0x1000b0a2
-      copy length computed by subtraction (integer underflow to a huge size?)
 ```
 
 Those addresses are real functions in a stripped C++ parser that most
-disassemblers never even recover: `knife` seeds function discovery from the PE
-exception directory, taking `7z.dll` from 87 functions to 6472, and reads the
-argument that reaches each dangerous call to rank the ones that look
-exploitable. It works the same on a Linux daemon or a macOS dylib.
-
-## Why
-
-Pulling apart an unknown binary usually means five tools: one for the headers,
-one for strings and IOCs, one for imports, one for entropy, one to disassemble.
-`knife` is all of them in a single command, across three formats, with a
-transparent triage verdict on top. Everything is static: it reads the bytes on
-disk and never runs the file.
-
-But the reason to reach for it is the next step, the one the other tools leave to
-you: it says what the target is protected by, where its dangerous calls are,
-which of them look actually wrong, and what can reach them. See
-[for vulnerability research](#for-vulnerability-research).
+disassemblers never recover: `knife` seeds function discovery from the PE
+exception directory (`7z.dll`: 87 → 6472 functions) and ranks dangerous calls
+by the argument provenance that reaches them. Same story on a Linux daemon or
+a macOS dylib.
 
 ## Install
 
@@ -143,34 +58,48 @@ cargo binstall reknife
 cargo install --git https://github.com/bl4ckr0ss3/knife
 ```
 
-Or grab a prebuilt archive for Linux, macOS, or Windows from the
+Or grab a prebuilt archive from the
 [Releases](https://github.com/bl4ckr0ss3/knife/releases) page and drop `knife`
 on your `PATH`.
 
+## The TUI
+
+`knife tui FILE` opens a monochrome debugger-style workspace: function list,
+listing, cross-references. Bare `knife` opens a file explorer instead —
+directories first, PE/ELF/Mach-O badges sniffed from the magic bytes, `/`
+filters, Enter opens the workspace, and quitting the workspace returns to the
+explorer (`knife tui` without a file and `knife <dir>` do the same).
+
+`?` shows help, `:` opens command mode. The essentials:
+
+| key | does |
+|---|---|
+| `↵` | open a function, follow the call under the cursor, or jump to a xref |
+| `⌫` | back |
+| `g` | goto a symbol; `va:0x..` static VA, `off:0x..` file offset |
+| `/` | filter the function list, or search the listing |
+| `d` / `f` | pseudocode / spatial CFG view |
+| `s` | cycle functions, attack surface, driver summary, types |
+| `n` / `c` | name / note whatever the cursor is on |
+| `b` | bookmark |
+
+Commands worth knowing: `:split` clones the listing into a second column and
+`:compare FUNC` pins a function there — Tab walks between the columns, and
+each keeps its own cursor, view mode and history; `:only` collapses back.
+`:reload` re-reads the target from disk on a background worker; pane layout
+and annotations survive, a failed reload keeps the old session.
+`:xrefs`, `:callers`, `:callees`, `:imports`, `:exports`, `:strings`,
+`:sections`, `:bookmarks`, `:history` open filterable catalogs.
+Tab completes commands, Up/Down recalls them.
+
+Your names, notes, bookmarks, patches, types and prototypes save immediately
+to a SHA-256-keyed database shared with the CLI — quitting is not a save step.
+The database follows the binary, not the path; `--db PATH` relocates it and
+`KNIFE_NO_CACHE=1` forces a fresh analysis. The
+[milestone plan](docs/terminal-workstation-plan.md) tracks what is stabilized
+and what is next.
+
 ## Commands
-
-### ELF header inspection
-
-```bash
-knife headers ./target.elf                 # ELF file header, including raw e_ident[16]
-knife segments ./target.elf                # program headers and mapped section indices
-knife sections ./target.elf --details      # full section headers, including section zero
-knife headers ./target.elf --json          # raw values plus decoded labels
-```
-
-These commands use the core's Goblin-backed header inspector, without function
-recovery. ELF32/ELF64, both byte orders and extended header numbering are supported.
-Raw flags and unknown numeric values remain visible. Segment section indices show
-allocated sections contained in both memory and (except NOBITS) file ranges;
-this is static containment, not proof of runtime loader behavior. Header-specific
-TUI/MCP views are not implemented yet; the existing sections summary is unchanged.
-
-The README animation renders real TUI actions off-screen; it is not a live-terminal
-performance measurement and does not demonstrate the new CLI-only header views.
-On Windows, regenerate the GIF and MP4 with
-`./scripts/record-demo.ps1 -Target 'C:/Program Files/7-Zip/7z.dll'`.
-This requires Cargo, Python (`py`) with Pillow, and FFmpeg; nothing is installed
-automatically. Different target versions can produce different navigation results.
 
 One tool, many jobs, which is the point of a Swiss-army knife:
 
@@ -185,7 +114,7 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife paths FILE TARGET [--from F]` | call chains that reach a sink from entry points and exports |
 | `knife graph FILE [--from FUNC] [--reachable] [--dot]` | whole-program call graph, optionally rooted or Graphviz-ready |
 | `knife graph FILE --func FUNC [--dot]` | one function's control-flow graph as text, JSON, or DOT |
-| `knife tui FILE` | interactive: functions, listing, xrefs, naming and notes |
+| `knife tui FILE` | interactive: functions, listing, xrefs, split comparison, naming and notes |
 | `knife mcp [--file F]` | Model Context Protocol server over stdio (tools for agents) |
 | `knife name FILE ADDR NAME` | name an address; every later command uses it |
 | `knife note FILE ADDR TEXT` | annotate an address; shows up in the disassembly |
@@ -203,6 +132,8 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife dis FILE --func NAME` | disassemble a whole function with labels and xrefs |
 | `knife dis FILE [--vaddr X \| --off Y] [--count N]` | linear disassembly (x86/x64, AArch64) |
 | `knife pseudo FILE --func NAME` | pseudocode view: lifted statements, calls with arguments |
+| `knife headers FILE` | ELF file header, raw `e_ident` plus decoded labels |
+| `knife segments FILE` | ELF program headers and mapped section indices |
 | `knife sections FILE` | sections/segments with per-section entropy bars |
 | `knife imports FILE` | imported libs and functions, suspicious APIs flagged |
 | `knife exports FILE` | exported symbols |
@@ -210,7 +141,7 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife strings FILE --min N` | ASCII and UTF-16 strings |
 | `knife iocs FILE` | URLs, IPs, domains, emails, wallets, reg keys, paths, defanged |
 | `knife hashes FILE` | MD5 / SHA-1 / SHA-256 and imphash |
-| `knife drv FILE [--reachable]` | kernel-driver / BYOVD analysis: identity, devices & symlinks, IRP dispatch, IOCTL surface, kernel primitives (optionally reachable-from-user-mode only), Authenticode signing, known-vulnerable-driver matches |
+| `knife drv FILE [--reachable]` | kernel-driver / BYOVD analysis: identity, devices, IRP dispatch, IOCTLs, kernel primitives, signing, loldrivers matches |
 | `knife scan FILE` | crypto constants, packer markers, embedded formats |
 | `knife yara RULES FILE` | match YARA rules (RULES is a file or a directory) |
 | `knife map FILE` | whole-file entropy sparkline, packed regions flagged |
@@ -223,76 +154,35 @@ Add `--json` to any analysis command for machine-readable output. `knife FILE`
 is shorthand for `knife info FILE`, and `knife FILE --rules DIR` folds a YARA
 pass into the verdict.
 
-## Agents
-
-`knife mcp` serves every analysis above over the
-[Model Context Protocol](https://modelcontextprotocol.io), so an agent drives the
-same engine the command line does: recover functions, read pseudocode, rank the
-call sites whose arguments look exploitable, trace one back to where its length
-came from, and write names, notes and prototypes into the database.
-
-```bash
-claude mcp add knife -- knife mcp
-```
-
-or, for a client configured with JSON:
-
-```json
-{ "mcpServers": { "knife": { "command": "knife", "args": ["mcp"] } } }
-```
-
-Thirty tools. Bind a binary once — `knife mcp --file PATH`, or the `open` tool —
-and nothing after it needs a path. Being static, the server cannot run the sample
-it is reading, which is what makes it safe to hand an agent a piece of malware.
-
-Full tool table and per-client setup: **[docs/MCP.md](docs/MCP.md)**.
-
 ## For vulnerability research
 
-Triage asks whether a binary is hostile. Research asks a different question,
-where this binary can be broken, and four commands answer it.
+Triage asks whether a binary is hostile. Research asks where it can be broken,
+and four commands answer that:
 
-**What is it protected by.** `knife sec` reads the mitigations out of the
-container and says what each missing one costs you. It separates a claim from a
-fact: a PE with `DYNAMIC_BASE` set but no `.reloc` section still loads at its
-preferred base, a `GUARD_CF` flag with an empty guard function table checks
-nothing, and an ELF with no `PT_GNU_STACK` header at all gets an executable
-stack rather than a hardened one. Each line carries the consequence, so
-`no __stack_chk_fail reference` is followed by what that means for a linear
-overflow.
+**`knife sec` — what am I up against.** Reads the real mitigations, not the
+flags: a PE with `DYNAMIC_BASE` set but no `.reloc` still loads at its
+preferred base, a `GUARD_CF` flag with an empty guard table checks nothing.
+Each finding carries its consequence.
 
-**Where the surface is.** `knife sinks` matches the binary against a catalogue
-grouped by the mistake each API enables, unbounded copies, format strings,
-input-sized stack allocation, command execution, temp-file races, weak
-randomness, then resolves every one to concrete call sites. The output is
-addresses in named functions, not an import list: on `kernel32.dll` that is 327
-call sites across 17 APIs, and on a `vmlinux` image it finds 204 `strcpy` and
-220 `sprintf` sites in named kernel functions. Statically linked targets work
-too, because a defined symbol is matched the same way an import is.
+**`knife sinks` — where the surface is.** Matches the binary against a
+catalogue grouped by the mistake each API enables — unbounded copies, format
+strings, input-sized stack allocation, command execution — then resolves every
+hit to concrete call sites: addresses in named functions, not an import list.
+On `kernel32.dll` that is 327 call sites across 17 APIs; statically linked
+targets work the same way.
 
-**Which ones are actually wrong.** `knife sinks` still leaves you reading every
-call. `knife audit` reads them first: for each catalogued call it recovers where
-the interesting argument came from, and keeps only the sites whose provenance
-matches a bug pattern. A `memcpy` whose length was just computed by a
-subtraction (underflow to a huge size), an allocation sized by a multiply
-(integer overflow), a `printf` whose format string is loaded from memory rather
-than pointed at a constant, an unbounded `strcpy` reachable from an export.
-Each finding names the function, the address, and what is wrong, ranked so the
-exploitable-looking ones come first. Provenance is a bounded backward data-flow
-walk over argument registers (x86/x64): it stops at calls, follows copies and
-predecessor blocks, and joins origins across control-flow paths. When dangerous
-arithmetic reaches a sink on only some paths, the finding says so instead of
-dropping the candidate or claiming every path is dangerous. On a signed,
-hardened `kernel32.dll` it surfaces a dozen sites, not a thousand. The same
-provenance lattice marks function arguments and return values from external-input
-APIs (`getenv`, `fgets`, `read`, `recv`, `GetCommandLine*`, and related calls),
-so a tainted format string is distinguished from a generic runtime load.
+**`knife audit` — which ones look actually wrong.** For each catalogued call
+it recovers where the interesting argument came from (a bounded backward
+data-flow walk) and keeps only the sites whose provenance matches a bug
+pattern: a `memcpy` length computed by subtraction, an allocation sized by a
+multiply, a `printf` format loaded from memory. Ranked, named, and honest
+about paths: when dangerous arithmetic reaches a sink on only some paths, the
+finding says so. x86/x64.
 
-**What reaches what.** `knife xrefs` answers "who calls this" for a function,
-an imported API, or an address, and `--str` answers the other direction, which
-code touches this string. `knife paths` walks the call graph backwards from a
-sink to the entry point and the exports, printing the shortest chains, which is
-the reachability question that decides whether a sink is worth your afternoon.
+**`knife xrefs` / `knife paths` — what reaches what.** Who references a
+function, import, address, or string; and the shortest call chains from entry
+points and exports down to a sink. Empty results do not establish
+unreachability — indirect dispatch is outside this direct graph.
 
 ```bash
 knife sec ./target                       # what am I up against
@@ -302,338 +192,124 @@ knife xrefs ./target --str "/tmp/"       # who builds that path
 knife paths ./target system              # can anything reach it
 ```
 
-`knife graph` exports the same recovered edges used by paths and the TUI as a
-deterministic artifact. With no selector it emits the whole-program call graph,
-including imported and unresolved external callees. Repeat `--from FUNC` to
-keep a forward-reachable subgraph, or use `--reachable` to root it at entry and
-exports. `--func FUNC` switches to that function's basic-block CFG and marks
-loop/cross edges back to earlier blocks. Add global `--json` for automation or
-`--dot` for Graphviz:
+`knife graph` exports the recovered edges as a deterministic artifact —
+whole-program call graph, a forward-reachable subgraph, or one function's CFG —
+as text, JSON, or DOT:
 
 ```bash
 knife graph driver.sys --reachable
-knife graph driver.sys --from DriverEntry --from DispatchDeviceControl --json
 knife graph driver.sys --func DispatchDeviceControl --dot > ioctl-cfg.dot
 dot -Tsvg ioctl-cfg.dot -o ioctl-cfg.svg
 ```
 
-Node and edge ordering is stable, duplicate calls collapse, symbol text is DOT
-escaped, and an analysis-budget warning remains visible when recovery was
-truncated.
+Worked example on a real, shipped binary:
+[finding CVE-2017-11882 with knife](docs/case-study-eqnedt32.md) — `sec` shows
+the Equation Editor has no mitigations, `audit` flags the font-name copy, and
+`dis` confirms it is an `lstrcpy` of attacker data into a stack buffer.
 
-For a worked example on a real, shipped binary, see
-[finding CVE-2017-11882 with knife](docs/case-study-eqnedt32.md): `sec` shows the
-Equation Editor has no mitigations, `audit` flags the font-name copy, and `dis`
-confirms it is an `lstrcpy` of attacker data into a stack buffer.
-
-**What you worked out.** Everything above is derived from the bytes and can be
-recomputed at any time. What cannot be recomputed is what you understood, so
-`knife name` and `knife note` write it down, and every later command reads it
-back. Naming an address is not cosmetic: it tells the engine there is a function
-there, which is how you make progress on a stripped binary.
+**What you worked out.** Everything above is recomputable from the bytes; what
+you understood is not. `knife name` and `knife note` write it down, and every
+later command reads it back. Naming an address tells the engine there is a
+function there — how you make progress on a stripped binary.
 
 ```bash
 knife name ./target 0x4017a0 parse_record      # sub_4017a0 is now parse_record
 knife note ./target 0x4017c4 "len from packet" # shows up beside the instruction
 knife funcs ./target | grep parse_record       # and in every other command
-knife dis  ./target --func parse_record
 ```
 
-**Somewhere to do it.** `knife tui` puts the same analysis behind a keyboard:
-the function list on the left, the listing and cross-references on the right.
-`↵` opens a function or follows the call under the cursor, `⌫` returns to where
-you followed from, `/` filters the function list (or searches the code when the
-listing is focused), `g` goes to an address or a symbol, `d` toggles decompiled
-pseudocode, and `f` toggles a spatial function graph. Basic blocks are placed in
-top-down CFG layers with routed cyan/amber flow, explicit loop-back markers, and
-a fixed inspector showing the selected block's instructions and typed `TRUE`,
-`FALSE`, `FLOW`, `RETURN`, or `TERMINAL` exits. Arrow keys move geometrically
-between layers and sibling lanes; large switch layers use a selection-following
-horizontal viewport instead of overlapping nodes. Click a node or press `↵` to
-open the selected block in disassembly. In pseudocode, `t` binds the selected
-field base to a reusable user type and `e` names that field; empty input clears
-the binding or name. `p` edits the current function's exact prototype using
-`RETURN (PARAM, PARAM)` syntax (for example `bool (CONTEXT *, size_t)`); the
-existing value is prefilled and empty input clears it. In assembly, uppercase
-`P` stages replacement bytes at the selected instruction; the current bytes are
-prefilled, and submitting an empty value restores the complete patch run. `n` and
-`c` name and annotate whatever the cursor is on. `s` cycles the left pane: function list, ranked
-attack surface (the sink call sites the audit found worst first), and, for a
-driver, the `knife drv` summary (devices, IRP dispatch, IOCTL surface,
-primitives), then a whole-program analyst-type browser. The type browser groups
-exact prototypes, reusable structure layouts, and scoped function/base bindings;
-`/` filters names or facts, its detail rail shows the complete selected fact,
-and `↵` opens the owning function for prototypes and bindings. The attack-surface view is severity-coded and opens an evidence
-rail for the selected finding: pattern, sink, reachability, containing function,
-the audit explanation, and a compact `SOURCE → DATA FLOW → SINK` signal chain;
-`↵` jumps to the listed sink. The xrefs
-pane is a list of its own: tab into it, and `↵` jumps to the reference's site. Operands that
-point at a literal are annotated with the string itself, in the listing and in
-the printed `dis --func`, and following one opens its bytes as a hex dump. The
-mouse works too: the wheel scrolls the focused pane, a click focuses and
-selects. Names, notes, staged patches, type layouts, bindings, and prototypes go to the same database the
-command line writes, as you make them, so quitting is not a save step and `knife funcs` in another
-terminal already agrees with you.
+## Agents
+
+`knife mcp` serves every analysis above over the
+[Model Context Protocol](https://modelcontextprotocol.io), so an agent drives
+the same engine the command line does: recover functions, read pseudocode,
+rank the dangerous call sites, and write names, notes and prototypes into the
+database. Thirty tools; bind a binary once (`knife mcp --file PATH` or the
+`open` tool) and nothing after it needs a path. Being static, the server
+cannot run the sample it is reading — which is what makes it safe to hand an
+agent a piece of malware.
 
 ```bash
-knife tui ./target
+claude mcp add knife -- knife mcp
 ```
 
-### Safe binary patch workspace
-
-Knife treats edits as analysis facts, not destructive writes. The original
-sample remains the database identity and is never changed in place. Staged
-bytes are persisted with their expected originals, applied before function
-recovery, disassembly, pseudocode, graphs, xrefs, and vulnerability analysis,
-and kept in a separate derived-analysis cache. Overlapping edits preserve the
-true original byte; restoring a byte removes it from the workspace. Bounds,
-stale-input, malformed-hex, and overlapping on-disk records are rejected.
-
-```bash
-knife patch sample.exe --vaddr 0x401234 --bytes "31 c0 90" # stage by VA/RVA
-knife patch sample.exe --off 0x834 --bytes "90 90"          # or file offset
-knife patch sample.exe                                      # list patch runs
-knife db sample.exe --json                                  # patches are project facts
-knife dis sample.exe --func verify                          # analyzes staged bytes
-knife patch sample.exe --vaddr 0x401234 --clear             # restore its run
-knife patch sample.exe --export sample-patched.exe          # write a new file
-```
-
-Export uses a temporary file in the destination directory and then renames it,
-refuses to overwrite the input, and requires `--force` for an existing output.
-Changing any signed binary byte invalidates its existing digital signature;
-Knife reports that explicitly during export. Clearing or changing patches
-updates the TUI analysis immediately, while the command line applies them on
-the next invocation.
-
-The database is keyed by the file's SHA-256, so it follows the binary rather
-than the path, and pointing knife at a different build never silently applies
-the wrong names. Addresses are stored relative to the image base, in hex, as a
-flat list, which means a database survives rebasing and can be diffed,
-hand-edited, or sent to somebody else who has the same sample. It lives under
-your platform's data directory by default; `--db PATH` puts it wherever you
-want, and `knife db FILE` says which file is in use.
-
-Code-analysis commands also keep a compact binary cache beside that database.
-The cache holds only derived state (functions, CFGs, instructions and xrefs),
-so it is safe to delete and never contains your names or notes. It is keyed by
-the binary hash, Knife/cache version, analysis budget, and user-defined function
-names; any mismatch transparently recomputes and replaces it. Set
-`KNIFE_NO_CACHE=1` for a forced fresh analysis or `KNIFE_CACHE_DIR` to move the
-cache to a different directory.
+Full tool table and per-client setup: **[docs/MCP.md](docs/MCP.md)**.
 
 ## Kernel drivers & BYOVD
 
-`knife drv FILE` is the driver half of the audit. Everything goes through the
-same engine, so a `.sys` parses, disassembles, and decompiles just like an
-`.exe`; this pass turns the generic surface into the questions a driver
-review actually asks:
+`knife drv FILE` is the driver half of the audit. A `.sys` parses,
+disassembles, and decompiles like any other target; this pass turns the
+generic surface into the questions a driver review actually asks:
 
 | what | where |
 |---|---|
 | native-subsystem identity + `DriverEntry` | `driver` header line |
 | `\Device\` / `\DosDevices\` names and their xrefs | devices list |
-| `IRP_MJ_*` dispatch handlers (both historical x64 `MajorFunction` bases, 0x50 and 0x70, chosen by match count) | "irp dispatch" |
-| IOCTL codes decoded as `CTL_CODE` (device type / function / method / access), `METHOD_NEITHER` flagged | "ioctl surface" |
-| kernel primitives with call sites: physical-memory maps, arbitrary kernel R/W, driver loaders, registry/process, callbacks (the `ntoskrnl`/`hal`/`ndis` catalogue) | "kernel primitives" |
-| Authenticode signer subjects + SHA-1 thumbprints (catalog-signed files without an embedded table are reported as unsigned) | "signing" |
-| SHA-256 match against a bundled known-vulnerable-driver snapshot (loldrivers.io, 2000+ samples) | "known vulnerable driver" |
+| `IRP_MJ_*` dispatch handlers | "irp dispatch" |
+| IOCTL codes decoded as `CTL_CODE`, `METHOD_NEITHER` flagged | "ioctl surface" |
+| kernel primitives with call sites: physical-memory maps, arbitrary R/W, driver loaders, registry/process, callbacks | "kernel primitives" |
+| Authenticode signers + SHA-1 thumbprints | "signing" |
+| SHA-256 match against a bundled loldrivers.io snapshot (2000+ samples) | "known vulnerable driver" |
 
 ```bash
 knife drv ./sus.sys                 # the whole picture
-knife drv ./sus.sys --json          # machine-readable
 knife drv ./sus.sys --reachable     # primitives user mode can actually drive
 ```
 
-In the TUI (`knife tui`), the driver pane is navigable like the sinks: `s`/`v`
-cycle to it, `↑/↓` move, `↵` jumps to a primitive call site, an IRP handler, or
-a device string, and `n` names the selected row (so `DriverEntry` /
-`DispatchDeviceControl` can be persisted to the database). `w` toggles
-reachable-only, `3` gates on severity ≥ 3, and `/` filters the rows. The
-disassembly shows type hints on driver-relevant instructions
-(`; MajorFunction[14] /* IRP_MJ_DEVICE_CONTROL */`,
-`; Parameters.DeviceIoControl.IoControlCode`).
-
-The kernel API catalogue is a `sinks::CATALOG` extension (`ntapi.rs`), so
-`knife sinks` and `knife audit` already see ntoskrnl calls, and ordinal
-imports (`"ORDINAL N"`) are resolved against a table generated from the
-host's own `ntoskrnl.exe` / `ndis.sys` export directories by
-`scripts/gen-ntordinals.mjs` instead of being dropped. Windows-internals
-structure layouts (`DRIVER_OBJECT`, `IRP`, `IO_STACK_LOCATION`,
-`UNICODE_STRING`) live in `ktypes.rs`, awaiting the IR type-renaming pass;
-the palatable parts (dispatch-slot IRP names, IOCTL `Parameters` offsets) are
-already in use. The loldrivers snapshot is rebuilt with
-`scripts/gen-loldrivers.mjs` from the project's public API.
+In the TUI the driver pane is navigable like the sinks: `s` cycles to it,
+`↵` jumps to a call site or device, `w` toggles reachable-only, `3` gates on
+severity, `/` filters. The kernel API catalogue feeds `knife sinks` and
+`knife audit` too.
 
 ## What makes it more than objdump
 
-**Cross-format, one model.** [goblin](https://github.com/m4b/goblin) parses
-PE/ELF/Mach-O into a single neutral model, so every command works on every
-format. Validated on a signed Windows DLL, a stripped RISC-V ELF, and a macOS
-x86-64 Mach-O.
+- **Cross-format, one model.** [goblin](https://github.com/m4b/goblin) parses
+  PE/ELF/Mach-O into a single neutral model; every command works on every
+  format.
+- **A real analysis engine.** Recursive-descent disassembly seeded from the
+  entry point and every named symbol, jump-table resolution, basic blocks, CFG,
+  xref counting. On `kernel32.dll`: 2605 functions, 1515 named.
+- **It finds code control flow cannot reach.** Function discovery from the PE
+  exception directory and ELF `.eh_frame_hdr` — the 87 → 6472 jump above.
+  Chained unwind entries are continuations, not functions, and are skipped.
+- **Imports resolve to names.** `.plt`/GOT and `jmp [IAT]` thunks are followed,
+  so call sites read `call strcpy@plt` instead of an anonymous `sub_`.
+- **A decompiler engine.** `knife pseudo` lifts to an IR, propagates
+  expressions across blocks, eliminates dead stores, rebuilds `if`/`else`,
+  `while` and `switch` from dominators, and reads the stack frame as named
+  locals and arguments. The CVE-2017-11882 overflow comes out as the single
+  line `lstrcpyA(&var_28, arg_8 + 0x1c);`. Conservative types with
+  interprocedural argument and return propagation; anything the lifter does
+  not model prints verbatim, so the limits stay visible.
+- **User types that stick.** Reusable structure layouts, typed fields, scoped
+  bindings, exact prototypes, variable aliases — editable in the TUI and the
+  CLI, portable between binaries via `knife typelib`:
 
-**A real analysis engine.** `knife funcs` runs recursive-descent disassembly
-seeded from the entry point and every named symbol, follows calls and branches,
-splits basic blocks, resolves jump tables, builds a control-flow graph, and
-counts cross-references. `knife dis --func` prints a whole function with `loc_`
-labels, resolved call targets, and xrefs-to. On `kernel32.dll` it recovers 2605
-functions, 1515 of them named. Everything is in virtual-address space, so the
-address column, branch operands, and symbol names all agree.
+  ```bash
+  knife field sample.exe --type CONTEXT 0x18 length --data-type size_t
+  knife type  sample.exe --func parse_packet rcx CONTEXT
+  knife proto sample.exe --func parse_packet --returns bool --param "CONTEXT *"
+  knife typelib driver-a.sys --export kernel-types.json
+  knife typelib driver-b.sys --import kernel-types.json
+  ```
+- **A safe patch workspace.** Staged bytes are analysis facts: the original
+  file is never touched, analysis runs on the staged image, and `--export`
+  writes a patched copy atomically.
 
-**It finds code control flow cannot reach.** A stripped C++ binary reaches most
-of its functions only through vtables and function pointers, which recursive
-descent cannot follow, so descent alone sees a fraction of the code. On x64
-Windows the PE exception directory lists every non-leaf function with its start
-address, so knife seeds from it: on 7-Zip's `7z.dll` that is the difference
-between recovering 87 functions and recovering 6472, and between `knife sinks`
-finding one `memcpy` call site and finding 503. Chained unwind entries are
-continuations, not functions, and are skipped, so the seeds are one per real
-function.
-
-**Imports resolve to names.** A call to a library function never goes there
-directly: ELF routes it through a `.plt` stub that jumps via a GOT slot, and PE
-linkers emit the same shape as `jmp [IAT]` thunks. knife follows both, so a call
-site reads `call strcpy@plt` or `call KERNELBASE!CreateFileW` instead of an
-anonymous `sub_`. That naming is what makes the sink and cross-reference
-commands point at code rather than at an import table.
-
-**A decompiler engine.** `knife pseudo --func NAME` runs a small IR over each
-function: it lifts every instruction, propagates expressions (across block
-boundaries too) so a run of `mov`/`lea`/`add` collapses into what it computes,
-eliminates the dead intermediate assignments with a whole-function liveness
-pass, and folds constants. It runs a stack-frame analysis, so `[ebp - 0x28]`
-becomes the named local `var_28` and `[ebp + 8]` the argument `arg_8`, and the
-frame bookkeeping (`mov ebp, esp`, the `sub esp` allocation, `push ebp`,
-`leave`) is dropped. The CVE-2017-11882 overflow comes out as the single line
-`lstrcpyA(&var_28, arg_8 + 0x1c);` with nothing around it. It then structures the
-control flow: dominators and post-dominators drive a recursive emitter that
-rebuilds nested `if`/`else` and `while`, and an indexed jump through a table
-becomes a `switch` on its selector with each case structured. A function reads as
-C rather than a goto chain. Conditions are recovered from whatever set the flags,
-including the arithmetic ops (`dec`, `sub`, ...) that branch without a `cmp`, and
-the compare is followed across blocks so a multi-way dispatch reads as a real
-if/else-if chain. Register values are merged explicitly at CFG joins: identical
-definitions remain one expression, differing definitions become SSA-style phi
-values, and a provable two-arm diamond lowers to C's `condition ? a : b` instead
-of losing the value at the join. Function signatures carry conservative recovered
-types: ABI-visible parameters, returned values, string/address literals, and
-known library prototypes constrain types such as `const char *`, `size_t`, and
-`void *`; uncertain or conflicting evidence remains the explicit pointer-sized
-`uintptr_t`. Direct calls to recovered 64-bit functions also recover positional
-arguments interprocedurally: Knife follows the callee CFG and treats an ABI
-register as an input only when an entry-reachable path reads it before an
-unconditional write. Internal calls therefore retain their real argument
-expressions instead of collapsing to `helper()`, while uncertain registers stay
-omitted. Return types cross internal wrapper chains as well: when every return
-path traces `rax`/`eax` back to the same typed API result, callers inherit that
-type. The proof walks predecessor blocks and stops on cycles, conflicting paths,
-or any intervening overwrite, so a stale `malloc` result never turns a later
-integer return into a pointer. Parameter types propagate in the other direction:
-Knife tracks original ABI arguments through direct register copies inside a
-callee and observes which typed API or summarized internal parameter consumes
-them. That evidence improves caller signatures and caller-side stack storage;
-an internal `strlen` wrapper can recover both `const char * rcx` and a passed
-`char var_8[]`. Writes and calls kill provenance, incompatible pointee evidence
-degrades to `void *`, and unresolved values remain `uintptr_t`. Stack locals are declared from their use as scalars or addressed
-storage: narrow and wide APIs recover `char[]` and `wchar_t[]`, opaque or
-conflicting pointee evidence becomes `uint8_t[]`, and an unresolved array extent
-is labelled instead of guessed. Actual constant-offset dereferences recover
-stable synthetic aggregate fields (`ctx->field_18`) and constrain their ABI base
-to a pointer; negative offsets use `field_m8`. Frame-relative slots and scaled
-indexed accesses remain exact address expressions, because neither is sufficient
-evidence for a structure member. The prototype catalog also supplies call arity
-for recovered API arguments. The handful of edges that break nesting (a jump into a common
-handler) become an explicit `goto` to a labelled block, so the flow is preserved
-exactly, never approximated. It is not a full decompiler and does not pretend to
-be: local/aggregate type recovery is still limited, and any instruction the
-lifter does not model is printed verbatim so you always see where the clean lift
-stops.
-
-Recovered aggregate layouts can be refined without patching the binary or
-losing the synthetic offset evidence:
-
-```bash
-knife field sample.exe --type CONTEXT 0x18 length --data-type size_t
-knife field sample.exe --type CONTEXT 0x20 buffer --data-type "const uint8_t *"
-knife type  sample.exe --func parse_packet rcx CONTEXT
-knife var   sample.exe --func parse_packet rcx request
-knife proto sample.exe --func parse_packet --returns bool \
-  --param "CONTEXT *" --param "const uint8_t *" --param size_t
-knife pseudo sample.exe --func parse_packet   # CONTEXT *request; request->length
-
-# Reuse the same layout on another function/base, or undo either fact.
-knife type  sample.exe --func validate_packet rdi CONTEXT
-knife proto sample.exe --func parse_packet --clear
-knife var   sample.exe --func parse_packet rcx --clear
-knife field sample.exe --type CONTEXT 0x18 --clear
-knife type  sample.exe --func parse_packet rcx --clear
-```
-
-Field data types are optional and use the same conservative C-type grammar as
-prototypes. A typed member load participates in type inference: for example, a
-`bool` member loaded into the return register can recover a `bool` function
-return, and pointer members improve downstream call evidence. The TUI field
-editor accepts either `name` or `name: C_TYPE`, preserving the old untyped
-workflow.
-
-Recovered registers, stack arguments, and locals can be given function-scoped
-source-style aliases. Aliases affect signatures, declarations, expressions,
-subregister uses, and member accesses, but never replace the stable recovered
-identity used by type bindings and analysis. In pseudocode mode, put the cursor
-on a line containing the variable and press `l`; an empty value restores the
-recovered name. The CLI accepts either the recovered identity or its current
-alias when changing or clearing it.
-
-Type layouts are reusable inside the binary’s analysis database; bindings are
-scoped by function and stable pseudocode base (`rcx`, `rdi`, `var_8`, ...), so
-unrelated objects at the same offset never inherit each other’s field names.
-Exact prototypes are scoped by function address and override recovered return
-and ordered ABI parameter types; they also determine internal-call arity, so
-opaque callees retain the arguments an analyst has established. Existing
-databases remain valid, and `knife db` / `knife db --json` show layouts,
-bindings, and prototypes.
-
-Structure layouts can move between unrelated binaries without carrying unsafe
-address-scoped facts:
-
-```bash
-knife typelib driver-a.sys --export windows-kernel-types.json
-knife typelib driver-b.sys --import windows-kernel-types.json
-
-# Merge rejects a different name at an occupied offset and changes nothing.
-# Replace only the incoming named layouts when that is explicitly intended.
-knife typelib driver-b.sys --import windows-kernel-types.json --replace
-```
-
-The portable JSON format is versioned (`schema: 1`), deterministic, and keeps
-signed offsets readable. Optional field data types round-trip while old untyped
-schema-1 libraries remain valid. It contains structure/field layouts only.
-Function bindings, variable aliases, and prototypes remain in their binary
-database because copying address facts between builds would silently mislabel
-code.
-
-Inside the TUI, cycle the left pane to **Types** with `s`, focus it with `Tab`,
-then use uppercase `I` to merge a library, `R` to explicitly replace conflicting
-incoming layouts, or `E` to export. The status line reports the exact imported
-or exported type and field counts; successful imports refresh pseudocode in
-place.
-
-**Constant scanning.** `knife scan` fingerprints crypto and structure by their
-byte signatures: AES S-boxes (generated from the GF(2⁸) definition, not stored
-as literals), SHA-1/256/MD5/CRC32 constants in both byte orders, Base64
-alphabets, packer markers, and embedded formats (zip, 7z, gzip, PNG, PDF, CLR
-metadata). Embedded PEs are confirmed by walking the DOS to PE header chain.
-
-**YARA built in.** `knife yara` runs rules through
-[yara-x](https://github.com/VirusTotal/yara-x), VirusTotal's pure-Rust engine,
-so there is no libyara C dependency. Matches can feed the triage verdict.
-
-**Transparent triage.** The verdict (`CLEAN` / `LOW RISK` / `SUSPICIOUS` /
-`MALICIOUS`) is an additive score where every point is a named signal you can
-read. It weights concealment and anomaly (packing, RWX sections, high-entropy
-overlays, tiny import tables) above raw capability, because a system DLL
-legitimately exports powerful APIs. It shows what a binary can do and how it is
-built, and leaves intent to you.
+  ```bash
+  knife patch sample.exe --vaddr 0x401234 --bytes "31 c0 90"
+  knife dis sample.exe --func verify        # analyzes staged bytes
+  knife patch sample.exe --export sample-patched.exe
+  ```
+- **Constant scanning & YARA built in.** `knife scan` fingerprints AES S-boxes
+  (generated, not stored), SHA/MD5/CRC32 constants, packer markers, and
+  embedded formats. `knife yara` runs [yara-x](https://github.com/VirusTotal/yara-x),
+  VirusTotal's pure-Rust engine — no libyara C dependency.
+- **Transparent triage.** The verdict (`CLEAN` / `LOW RISK` / `SUSPICIOUS` /
+  `MALICIOUS`) is an additive score where every point is a named signal.
+  Concealment and anomaly weigh above raw capability — a system DLL
+  legitimately exports powerful APIs. It shows what a binary can do and how it
+  is built, and leaves intent to you.
 
 ## Examples
 
@@ -652,42 +328,6 @@ knife scan blob.bin
 knife iocs sample.exe --json | jq '.[] | select(.kind=="url").value'
 ```
 
-## Roadmap
-
-- [x] Multi-format parsing (PE / ELF / Mach-O)
-- [x] Static triage with a transparent verdict
-- [x] Strings, IOCs, imphash, entropy map
-- [x] Crypto/packer/embedded constant scanner
-- [x] YARA (yara-x) matching
-- [x] Analysis engine: functions, CFG, xrefs
-- [x] IAT and PLT import-name resolution in disassembly
-- [x] Exploit-mitigation audit (`knife sec`)
-- [x] Sink call sites, code and data xrefs, call-graph reachability
-- [x] Persistent analysis database: your names and notes, kept between sessions
-- [x] Interactive TUI (spatial CFG / listing / xrefs, decompiled pseudocode, naming and notes)
-- [x] Library-function identification (FLIRT-style)
-- [x] AArch64 disassembly and PLT-veneer resolution
-- [x] Argument-provenance bug audit (`knife audit`)
-- [x] Function discovery from the PE exception directory (stripped C++ coverage)
-- [x] Function discovery from ELF `.eh_frame_hdr` (the same win for ELF)
-- [x] Versioned persistent cache for functions, CFGs, instructions and xrefs
-- [x] Pseudocode view (`pseudo`): lifted statements, calls with arguments
-- [x] Structured decompiler (`pseudo`): if/else and while reconstruction,
-      cross-block expression propagation, dead-store elimination
-- [x] Conservative typed signatures and stack locals from ABI/API evidence
-- [x] Pointer and synthetic aggregate-field recovery from constant dereferences
-- [x] Persistent reusable user types, field names, and scoped pointer bindings
-- [x] Interprocedural argument recovery for direct internal 64-bit calls
-- [x] Conservative return-type propagation through internal wrapper chains
-- [x] Callee-to-caller parameter typing with CFG register provenance
-- [x] Cached interprocedural summaries and persistent exact function prototypes
-- [x] Versioned cross-binary structure libraries with transactional import
-- [x] Typed structure fields with decompiler inference and TUI library management
-- [x] Persistent function-scoped pseudocode variable aliases across CLI and TUI
-- [x] Deterministic CFG and whole-program call-graph export (text/JSON/DOT)
-- [x] Persistent non-destructive binary patch workspace with CLI/TUI editing and atomic export
-- [x] Reusable `reknife` core library shared by CLI, TUI, and MCP clients
-
 ## Build from source
 
 ```bash
@@ -696,12 +336,13 @@ cargo test
 ```
 
 Needs Rust 1.88 or newer (2021 edition). No system libraries beyond the
-platform default; the YARA engine and the terminal interface are both pure Rust.
+platform default; the YARA engine and the terminal interface are both pure
+Rust.
 
 ## Community
 
-There is a Discord server for triage walkthroughs, analysis help, and release
-announcements: [join the server](https://discord.gg/hU5NYVfzd).
+Questions, triage walkthroughs, and release announcements happen on Discord:
+[join the server](https://discord.gg/hU5NYVfzd).
 
 ## Contributing
 
