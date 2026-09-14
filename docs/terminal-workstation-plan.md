@@ -11,14 +11,16 @@ complete query parity is still stabilization work.
 - Monochrome TUI, forward/back navigation, catalog filtering and pane controls.
 - ELF header/program-header/section-header inspection in the core and CLI.
 - Reproducible README terminal animation and MP4 via scripts/record-demo.ps1.
+- Background `:reload` that rereads the target from disk, preserving the
+  session on failure and following content identity for annotations.
+- Explicit goto address modes: `off:`/`file:` file offsets, `va:` static VAs.
+- Inspection of targets with no recovered functions, and a resize notice
+  instead of clipped fragments below a 24x6 terminal.
 
 ## Next work
 
 1. Expose ELF headers and segments through TUI views using the shared API.
-2. Make reload reread disk safely, preserving the current session on failure.
-3. Add explicit goto address modes and consistent focus-scoped filtering.
-4. Allow useful inspection when no functions are recovered.
-5. Improve scrollable help, small-terminal behavior and CLI/MCP query parity.
+2. Improve scrollable help and CLI/MCP query parity.
 
 Decompiler and inferred-type views remain experimental. New capabilities should
 be small, independently testable changes rather than another architecture rewrite.

@@ -151,7 +151,7 @@ use crate::analysis::strings::Located;
 use crate::db::Db;
 use crate::listing::{self, Line};
 use crate::model::Binary;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -308,6 +308,71 @@ struct WorkResult {
     driver: Option<crate::analysis::driver::DriverReport>,
 }
 
+/// Where the target lives on disk, so `:reload` can pick up external changes.
+/// A session started from an injected image has no source and cannot reload.
+#[derive(Debug, Clone)]
+pub struct TargetSource {
+    pub path: std::path::PathBuf,
+    pub db_path: Option<std::path::PathBuf>,
+}
+
+/// What a reload worker computes; identical in shape to the startup pipeline.
+struct ReloadOutcome {
+    work: WorkResult,
+    elapsed_ms: u128,
+}
+
+/// Re-read the target from disk and run the full startup analysis pipeline
+/// on it. The annotation database follows content identity: an unchanged file
+/// reloads into the same database, a changed file starts a fresh one.
+fn load_target(source: &TargetSource) -> Result<WorkResult> {
+    let file = source.path.to_string_lossy().to_string();
+    let original = std::fs::read(&source.path)
+        .with_context(|| format!("cannot read {}", source.path.display()))?;
+    let original_bin = crate::formats::analyze(&file, &original)?;
+    let db = Db::load(
+        &crate::analysis::hashes::sha256_hex(&original),
+        &file,
+        source.db_path.as_deref().and_then(|p| p.to_str()),
+    )?;
+    let bytes = db.apply_patches(original)?;
+    let bin = if db.patches.is_empty() {
+        original_bin
+    } else {
+        crate::formats::analyze(&file, &bytes)
+            .context("staged patches make the binary unparsable")?
+    };
+    if !crate::analysis::disasm::supported(bin.arch) {
+        anyhow::bail!(
+            "the interactive view needs x86, x64, or AArch64 disassembly; this is {}",
+            bin.arch.label()
+        );
+    }
+    let an = engine::analyze(&bin, &bytes, crate::ANALYSIS_BUDGET, &db);
+    let mut sinks = crate::analysis::audit::run(&an, &bin, &bytes);
+    sinks.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(b.reachable.cmp(&a.reachable))
+            .then(a.addr.cmp(&b.addr))
+    });
+    let strings = listing::string_map(&bin, &bytes, engine::display_base(&bin));
+    let driver = if crate::analysis::driver::plausibly_a_driver(&bin) {
+        Some(crate::analysis::driver::report(&bin, &bytes, &an, &strings))
+    } else {
+        None
+    };
+    Ok(WorkResult {
+        bin,
+        bytes,
+        db,
+        an,
+        sinks,
+        strings,
+        driver,
+    })
+}
+
 pub struct App {
     // ── the target ──
     pub bin: Binary,
@@ -398,6 +463,12 @@ pub struct App {
     pub frame: u64,
     /// Explicit legacy recording mode. Defaults to false in the workstation.
     pub splash: bool,
+
+    // ── reload ──
+    /// On-disk location of the target, set by the session entry point.
+    pub source: Option<TargetSource>,
+    /// The in-flight reload, if `:reload` is running its worker.
+    reloading: Option<std::sync::mpsc::Receiver<Result<ReloadOutcome>>>,
 }
 
 impl App {
@@ -458,6 +529,8 @@ impl App {
             refview: RefView::To,
             frame: 0,
             splash: false,
+            source: None,
+            reloading: None,
         };
         app.refilter();
         // Open something immediately: an empty right-hand pane makes the tool
@@ -465,8 +538,42 @@ impl App {
         if let Some(&i) = app.order.first() {
             let addr = app.an.functions[i].addr;
             app.open(addr, false);
+        } else {
+            // No recovered functions is not a dead end: sections, strings and
+            // raw bytes are still worth looking at.
+            app.open_inspection_view();
         }
         app
+    }
+
+    /// A target with no recovered functions still opens: the first mapped
+    /// bytes as a data view, so sections, strings and notes all still work.
+    fn open_inspection_view(&mut self) {
+        let address = self
+            .bin
+            .entry
+            .checked_add(self.base)
+            .filter(|&a| self.is_mapped(a))
+            .or_else(|| {
+                self.bin
+                    .sections
+                    .iter()
+                    .find(|s| s.file_size > 0)
+                    .map(|s| self.base + s.vaddr)
+            })
+            .filter(|&a| self.is_mapped(a));
+        match address {
+            Some(a) => {
+                self.open(a, false);
+                self.status =
+                    "no functions recovered; opened mapped bytes (:strings/:sections still work)"
+                        .into();
+            }
+            None => {
+                self.status =
+                    "no functions or mapped data recovered; try :strings or :sections".into();
+            }
+        }
     }
 
     // ── function list ──
@@ -537,10 +644,7 @@ impl App {
                 self.clamp_xsel();
                 return;
             }
-            self.status = format!(
-                "0x{:x} is not inside a recovered function",
-                addr + self.base
-            );
+            self.status = format!("0x{addr:x} is not inside a recovered function");
             return;
         };
 
@@ -888,6 +992,29 @@ impl App {
         self.cursor = next;
         let pos = hits.iter().position(|&i| i == next).unwrap_or(0) + 1;
         self.status = format!("match {pos}/{} for '{text}'", hits.len());
+    }
+
+    /// Resolve a goto target. A bare value is a symbol or a static VA (the
+    /// space addresses are displayed in); `va:0x..` pins the value to that
+    /// space even when a symbol shares the text, and `off:0x..` (or
+    /// `file:0x..`) reads the value as a file offset and converts it through
+    /// the section table.
+    fn resolve_goto(&self, text: &str) -> Result<u64> {
+        let text = text.trim();
+        if let Some(rest) = text
+            .strip_prefix("off:")
+            .or_else(|| text.strip_prefix("file:"))
+        {
+            let offset = parse_hex(rest)?;
+            return engine::off_to_va(&self.bin, self.base, offset).ok_or_else(|| {
+                anyhow::anyhow!("file offset 0x{offset:x} is not in a file-backed section")
+            });
+        }
+        if let Some(rest) = text.strip_prefix("va:") {
+            return parse_hex(rest)
+                .map_err(|_| anyhow::anyhow!("bad static VA {rest:?}; use va:0xADDRESS"));
+        }
+        crate::api::navigation::resolve_address_in(&self.an, text).map(|a| a.get())
     }
 
     // ── sinks / driver views ──
@@ -1328,7 +1455,7 @@ impl App {
             if self.an.find_function(t).is_none() && self.an.function_at(t).is_none() {
                 self.status = match self.an.imports.get(&t) {
                     Some(n) => format!("{n} is imported; there is no body to show"),
-                    None => format!("0x{:x} is not a recovered function", t + self.base),
+                    None => format!("0x{t:x} is not a recovered function"),
                 };
                 return;
             }
@@ -1421,7 +1548,7 @@ impl App {
         if self.an.function_at(t).is_none() && self.an.find_function(t).is_none() {
             self.status = match self.an.imports.get(&t) {
                 Some(n) => format!("{n} is imported; there is no body to show"),
-                None => format!("0x{:x} is not in a recovered function", t + self.base),
+                None => format!("0x{t:x} is not in a recovered function"),
             };
             return;
         }
@@ -1453,8 +1580,8 @@ impl App {
             Ask::Filter => {
                 self.set_filter(text);
             }
-            Ask::Goto => match crate::api::navigation::resolve_address_in(&self.an, &text) {
-                Ok(address) => self.open(address.get(), true),
+            Ask::Goto => match self.resolve_goto(&text) {
+                Ok(address) => self.open(address, true),
                 Err(error) => self.status = error.to_string(),
             },
             Ask::Search => self.search_listing(text),
@@ -1759,6 +1886,119 @@ impl App {
         self.relist();
     }
 
+    // ── reload from disk ──
+
+    /// Start a background re-read of the target file. Unlike `r`, which
+    /// re-analyses the bytes already in memory after an edit, `:reload` picks
+    /// up what another tool wrote to the file. The workspace keeps running
+    /// until `poll_reload` applies the result; a failed reload changes
+    /// nothing but the status line.
+    pub fn reload(&mut self) {
+        if self.reloading.is_some() {
+            self.status = "reload already running".into();
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            self.status = "no on-disk target; this session cannot reload".into();
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let _ = tx.send(load_target(&source).map(|work| ReloadOutcome {
+                work,
+                elapsed_ms: started.elapsed().as_millis(),
+            }));
+        });
+        self.reloading = Some(rx);
+        self.status = "reloading from disk...".into();
+    }
+
+    /// Whether a reload worker is in flight; the event loop polls instead of
+    /// blocking while this is true.
+    pub fn is_reloading(&self) -> bool {
+        self.reloading.is_some()
+    }
+
+    /// Collect a finished reload, if there is one. Applied state replaces the
+    /// session wholesale; a failure keeps the old session untouched.
+    pub fn poll_reload(&mut self) {
+        let Some(rx) = &self.reloading else { return };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("the reload worker died"))
+            }
+        };
+        self.reloading = None;
+        match outcome {
+            Ok(outcome) => self.apply_reload(outcome),
+            Err(error) => {
+                self.status = format!("reload failed, kept the old session: {error:#}");
+            }
+        }
+    }
+
+    fn apply_reload(&mut self, outcome: ReloadOutcome) {
+        let WorkResult {
+            bin,
+            bytes,
+            db,
+            an,
+            sinks,
+            strings,
+            driver,
+        } = outcome.work;
+        let before = self.an.functions.len();
+        self.bin = bin;
+        self.bytes = bytes;
+        self.db = db;
+        self.an = an;
+        self.sinks = sinks;
+        self.strings = strings;
+        self.driver = driver;
+        self.base = engine::display_base(&self.bin);
+        // Locations from the old image may not exist in the new one; stale
+        // jumps are worse than a cleared stack.
+        self.history.clear();
+        self.future.clear();
+        self.cur = None;
+        self.lines.clear();
+        self.cursor = 0;
+        self.pseudo = false;
+        self.graph = false;
+        self.pseudo_lines.clear();
+        self.view_positions = navigation::ViewPositions::default();
+        self.prompt = None;
+        self.browser = None;
+        self.reference_anchor = None;
+        self.xsel = 0;
+        self.ssel = 0;
+        self.dsel = 0;
+        self.tsel = 0;
+        self.search.clear();
+        // Pane sizes, focus, filter and the left-pane mode survive: they are
+        // how the analyst arranged their desk, not facts about the target.
+        self.refilter();
+        self.clamp_xsel();
+        self.clamp_dsel();
+        self.clamp_tsel();
+        if let Some(&i) = self.order.first() {
+            let addr = self.an.functions[i].addr;
+            self.open(addr, false);
+        } else {
+            self.open_inspection_view();
+        }
+        self.focus = Focus::Functions;
+        self.status = format!(
+            "reloaded in {}ms: {} functions (was {})",
+            outcome.elapsed_ms,
+            self.an.functions.len(),
+            before
+        );
+    }
+
     /// Rebuild every view derived from target bytes after an interactive edit.
     fn refresh_analysis(&mut self) {
         self.an = engine::analyze(&self.bin, &self.bytes, crate::ANALYSIS_BUDGET, &self.db);
@@ -1787,6 +2027,18 @@ impl App {
         // The splash swallows the first key so it cannot quit or navigate.
         if self.splash {
             self.splash = false;
+            return;
+        }
+
+        // While a reload runs, the workspace being replaced must not be
+        // navigated; only leaving is allowed.
+        if self.reloading.is_some() {
+            let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if quit {
+                self.quit = true;
+            }
             return;
         }
 
@@ -2284,6 +2536,16 @@ fn format_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+/// Hexadecimal, with or without a `0x` prefix, matching the rest of the CLI.
+fn parse_hex(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let raw = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    u64::from_str_radix(raw, 16).map_err(|_| anyhow::anyhow!("bad hexadecimal value {text:?}"))
+}
+
 fn plural_suffix(count: usize) -> &'static str {
     if count == 1 {
         ""
@@ -2456,7 +2718,7 @@ fn parse_prototype(text: &str) -> Result<(String, Vec<String>), String> {
 /// Analysis runs on a worker thread with an elapsed-time status, so opening a
 /// large binary leaves the terminal responsive;
 /// `q` / Esc / Ctrl-C quit even while it is still working.
-pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
+pub fn run(source: TargetSource, bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
     // Keep initial analysis, string mapping and driver reporting off the UI thread.
     let (tx, rx) = std::sync::mpsc::channel::<WorkResult>();
     std::thread::spawn(move || {
@@ -2545,14 +2807,11 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
             return Err(e);
         }
     };
-    if an.functions.is_empty() {
-        let _ = ratatui::crossterm::execute!(&mut stdout(), event::DisableMouseCapture);
-        ratatui::restore();
-        anyhow::bail!("no functions were recovered, so there is nothing to browse");
-    }
-
     // Open the usable workspace immediately. No intro replay or idle animation.
+    // A target with no recovered functions is still inspectable: the workspace
+    // opens on its mapped bytes and the catalogs stay available.
     let mut app = App::new(bin, bytes, db, an, sinks, strings, driver, title);
+    app.source = Some(source);
     let res = loop {
         if let Ok(area) = term.size() {
             app.dims = (area.width, area.height);
@@ -2560,12 +2819,27 @@ pub fn run(bin: Binary, bytes: Vec<u8>, db: Db, title: String) -> Result<()> {
         if let Err(e) = term.draw(|f| render::draw(f, &app)) {
             break Err(e.into());
         }
-        // No background work remains: block until input/resize instead of redrawing idle frames.
-        match event::read() {
-            Ok(Event::Key(k)) => app.on_key(k),
-            Ok(Event::Mouse(m)) => app.on_mouse(m),
-            Ok(_) => {}
-            Err(e) => break Err(e.into()),
+        app.poll_reload();
+        if app.is_reloading() {
+            // A reload has a worker in flight: poll with a timeout so the
+            // result is applied promptly instead of waiting for input.
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => match event::read() {
+                    Ok(Event::Key(k)) => app.on_key(k),
+                    Ok(Event::Mouse(_)) | Ok(_) => {}
+                    Err(e) => break Err(e.into()),
+                },
+                Ok(false) => {}
+                Err(e) => break Err(e.into()),
+            }
+        } else {
+            // No background work remains: block until input/resize instead of redrawing idle frames.
+            match event::read() {
+                Ok(Event::Key(k)) => app.on_key(k),
+                Ok(Event::Mouse(m)) => app.on_mouse(m),
+                Ok(_) => {}
+                Err(e) => break Err(e.into()),
+            }
         }
         if app.quit {
             break Ok(());
@@ -4215,5 +4489,216 @@ mod tests {
         app.on_key(KeyEvent::from(KeyCode::Char('q')));
         assert!(app.quit, "the first key is handled immediately");
         assert!(app.prompt.is_none());
+    }
+
+    #[test]
+    fn goto_supports_explicit_address_modes() {
+        let mut app = two_functions();
+        // In the fixture the .text section is file-backed at its own address,
+        // so a file offset and its static VA coincide.
+        app.commit(Ask::Goto, 0, "off:0x100b".into());
+        assert_eq!(app.cur, Some(0x100b), "file offset converts to a static VA");
+
+        app.commit(Ask::Goto, 0, "va:0x1000".into());
+        assert_eq!(app.cur, Some(0x1000), "va: pins a static VA");
+
+        app.commit(Ask::Goto, 0, "file:0x1005".into());
+        // file: is the same mode as off:; an interior address opens its
+        // containing function, the same as a bare static VA would.
+        assert_eq!(app.cur, Some(0x1000));
+
+        app.commit(Ask::Goto, 0, "off:0x0".into());
+        assert!(
+            app.status.contains("not in a file-backed section"),
+            "an offset outside every section says so: {}",
+            app.status
+        );
+        assert_eq!(app.cur, Some(0x1000), "a failed goto moves nothing");
+
+        app.commit(Ask::Goto, 0, "va:garbage".into());
+        assert!(app.status.contains("bad static VA"), "{}", app.status);
+    }
+
+    #[test]
+    fn error_messages_show_the_address_as_typed() {
+        // Regression: miss errors used to add the image base a second time.
+        let mut app = two_functions();
+        app.commit(Ask::Goto, 0, "0xdead".into());
+        assert!(
+            app.status
+                .contains("0xdead is not inside a recovered function"),
+            "{}",
+            app.status
+        );
+    }
+
+    /// A parseable target whose only section holds data, not code.
+    fn data_only_app() -> App {
+        let bytes = b"\x7fELF\x02\x01\x01\0not code, just bytes".to_vec();
+        let mut bin = Binary::stub(Format::Elf, Arch::X86_64);
+        bin.entry = 0x1000;
+        bin.sections = vec![Section {
+            name: ".rodata".into(),
+            vaddr: 0x1000,
+            vsize: bytes.len() as u64,
+            file_off: 0x1000,
+            file_size: bytes.len() as u64,
+            entropy: 0.0,
+            read: true,
+            write: false,
+            exec: false,
+        }];
+        let mut padded = vec![0u8; 0x1000];
+        padded.extend_from_slice(&bytes);
+        let db = Db::default();
+        let an = engine::analyze(&bin, &padded, 10_000, &db);
+        assert!(an.functions.is_empty(), "the fixture recovers nothing");
+        let sinks = ranked_sinks(&an, &bin, &padded);
+        let strings = listing::string_map(&bin, &padded, engine::display_base(&bin));
+        App::new(bin, padded, db, an, sinks, strings, None, "blob".into())
+    }
+
+    #[test]
+    fn a_zero_function_target_opens_an_inspection_view() {
+        let mut app = data_only_app();
+        assert!(
+            app.cur.is_some(),
+            "the workspace opens on the first mapped bytes"
+        );
+        assert!(!app.lines.is_empty(), "the data view has rows to browse");
+        assert!(
+            app.status.contains("no functions recovered"),
+            "the empty analysis is explained: {}",
+            app.status
+        );
+        // Catalogs do not depend on recovered functions.
+        let out = rendered(&mut app, 110, 30);
+        assert!(out.contains("0 functions"), "the header stays honest");
+    }
+
+    #[test]
+    fn a_zero_function_target_still_navigates_mapped_addresses() {
+        let mut app = data_only_app();
+        app.commit(Ask::Goto, 0, "0x1004".into());
+        assert_eq!(app.cur, Some(0x1004), "goto opens the data at the address");
+        app.commit(Ask::Goto, 0, "off:0x1004".into());
+        assert_eq!(app.cur, Some(0x1004), "file offsets work the same way");
+        app.toggle_sinks();
+        assert_eq!(app.left, LeftView::Sinks, "view cycling still works");
+    }
+
+    /// Poll a reload to completion with a bound, so a stuck worker fails the
+    /// test rather than hanging the suite.
+    fn wait_for_reload(app: &mut App) {
+        for _ in 0..1000 {
+            app.poll_reload();
+            if !app.is_reloading() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the reload worker did not finish in five seconds");
+    }
+
+    fn temp_source(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("knife-tui-reload-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("target.elf"), dir.join("workspace.json"))
+    }
+
+    #[test]
+    fn reload_swaps_the_target_and_preserves_the_desk_layout() {
+        let (target, db_path) = temp_source("swap");
+        std::fs::write(&target, crate::formats::fixture::elf_with_plt_call()).unwrap();
+
+        let mut app = two_functions();
+        app.pane_settings.left_width = 44;
+        app.filter = "ent".into();
+        app.refilter();
+        app.open(0x1000, false);
+        app.open(0x100b, true);
+        assert_eq!(app.history.len(), 1, "the old image has navigation history");
+        app.source = Some(TargetSource {
+            path: target.clone(),
+            db_path: Some(db_path.clone()),
+        });
+
+        app.reload();
+        assert!(app.is_reloading(), "the worker is in flight");
+        wait_for_reload(&mut app);
+
+        assert!(
+            !app.an.functions.is_empty(),
+            "the disk fixture's functions arrived"
+        );
+        assert!(app.history.is_empty(), "old-image navigation is dropped");
+        assert_eq!(
+            app.pane_settings.left_width, 44,
+            "pane layout survives a reload"
+        );
+        assert_eq!(app.filter, "ent", "the analyst's filter survives");
+        assert!(
+            app.status.contains("reloaded in"),
+            "the swap is reported: {}",
+            app.status
+        );
+        std::fs::remove_dir_all(target.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn keys_are_inert_while_a_reload_is_in_flight() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<ReloadOutcome>>();
+        app.reloading = Some(rx);
+        app.on_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.cur, Some(0x1000), "navigation does nothing mid-reload");
+        assert!(!app.quit);
+        app.on_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(app.quit, "leaving is still possible");
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_old_session() {
+        let (target, db_path) = temp_source("missing");
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.open(0x100b, true);
+        app.source = Some(TargetSource {
+            path: target, // never written
+            db_path: Some(db_path),
+        });
+        app.reload();
+        wait_for_reload(&mut app);
+        assert!(app.status.contains("reload failed"), "{}", app.status);
+        assert_eq!(
+            app.cur,
+            Some(0x100b),
+            "the old session is untouched by a failed reload"
+        );
+        assert_eq!(app.history.len(), 1, "history survives too");
+    }
+
+    #[test]
+    fn reload_without_an_on_disk_source_reports_it() {
+        let mut app = two_functions();
+        app.reload();
+        assert!(!app.is_reloading());
+        assert!(app.status.contains("no on-disk target"), "{}", app.status);
+    }
+
+    #[test]
+    fn a_too_small_terminal_gets_a_notice_instead_of_fragments() {
+        let mut app = two_functions();
+        for (w, h) in [(10u16, 4u16), (20, 5), (23, 30), (60, 5)] {
+            let out = rendered(&mut app, w, h);
+            assert!(out.contains("too small"), "{w}x{h} shows the notice");
+        }
+        let out = rendered(&mut app, 110, 30);
+        assert!(
+            !out.contains("terminal too small"),
+            "a normal terminal is untouched"
+        );
     }
 }

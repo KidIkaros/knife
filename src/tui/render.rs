@@ -91,6 +91,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         super::splash::draw(f, f.area(), app.frame, false);
         return;
     }
+    // Below this size no pane carries enough content to read; say so instead
+    // of drawing a misleading mosaic of fragments.
+    let area = f.area();
+    if area.width < 24 || area.height < 6 {
+        f.render_widget(
+            Paragraph::new("KNIFE\n\nterminal too small; resize the window")
+                .style(Style::default().fg(muted()).bg(canvas()))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
     f.render_widget(
         Block::default().style(Style::default().fg(muted()).bg(canvas())),
         f.area(),
@@ -1216,8 +1228,9 @@ fn help(f: &mut Frame, area: Rect) {
         "                 in types: I import, R replace, E export; ↵ opens owner",
         "  x              toggle the reference pane between callers (xrefs to the",
         "                 cursor) and callees (the calls the function makes)",
-        "  g              go to an address or a symbol",
+        "  g              go to address/symbol; off:0x.. offset, va:0x.. VA",
         "  r              re-analyse",
+        "  :reload        re-read the target from disk; desk layout survives",
         "  d              toggle decompiled pseudocode for the current function",
         "  f              toggle the spatial control-flow graph; arrows move by",
         "                 layer/lane, click selects, ↵ opens the block in asm",

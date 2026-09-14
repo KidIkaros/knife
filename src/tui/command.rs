@@ -25,6 +25,7 @@ pub enum Command {
     Close,
     Widen,
     Narrow,
+    Reload,
     Help,
     Quit,
 }
@@ -58,6 +59,7 @@ pub const NAMES: &[&str] = &[
     "close",
     "widen",
     "narrow",
+    "reload",
     "help",
     "quit",
 ];
@@ -207,6 +209,7 @@ impl super::App {
                 }
             }
             Command::Catalog(catalog) => self.show_catalog(catalog),
+            Command::Reload => self.reload(),
             Command::Help => self.help = true,
             Command::Quit => self.quit = true,
         }
@@ -259,6 +262,7 @@ pub fn parse(input: &str) -> Result<Command, String> {
         "close" => no_args(Command::Close),
         "widen" => no_args(Command::Widen),
         "narrow" => no_args(Command::Narrow),
+        "reload" => no_args(Command::Reload),
         "focus" => match rest {
             "functions" => Ok(Command::Focus(super::Focus::Functions)),
             "listing" => Ok(Command::Focus(super::Focus::Listing)),

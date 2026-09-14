@@ -11,6 +11,7 @@ binary. Static only: it reads the bytes on disk and never runs the target.
 [![crates.io](https://img.shields.io/crates/v/reknife.svg)](https://crates.io/crates/reknife)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![platforms](https://img.shields.io/badge/platform-linux%20%C2%B7%20macos%20%C2%B7%20windows-informational)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white&logoWidth=20)](https://discord.gg/hU5NYVfzd)
 
 <img src="assets/demo.gif" width="990" alt="knife TUI: function navigation, strings, sections, imports, and history">
 
@@ -44,6 +45,18 @@ opens the selected static address. Static VA and file offset are labeled separat
 hash-keyed annotation JSON and do not require a research database or model provider.
 Tab completes command names; Up/Down recalls commands. Backspace or Alt+Left returns;
 Alt+Right moves forward. Names take precedence over hexadecimal static addresses.
+`:goto` accepts explicit address modes: `off:0xOFFSET` (alias `file:`) converts a
+file offset through the section table, and `va:0xADDRESS` pins a value to the
+static-VA space when a symbol shares the text.
+`:reload` re-reads the target from disk and re-analyses it on a background
+worker, so a packer run or a rebuilt sample lands without restarting the
+session. Pane layout, filters and bookmarks survive; navigation into the old
+image does not. Annotations follow content identity: an unchanged file reloads
+into the same database, a changed file starts a fresh one, and a failed reload
+keeps the old session untouched.
+A target with no recovered functions is no longer refused: the workspace opens
+on the first mapped bytes and the section, string and import catalogs stay
+available. Tiny terminals get a resize notice instead of clipped fragments.
 `:next` and `:previous` open adjacent recovered functions in static-address order,
 without wrapping or changing the function filter. `:history` browses past/forward
 locations; `/` filters and Enter restores the saved view/cursor as a new navigation
@@ -673,6 +686,11 @@ cargo test
 
 Needs Rust 1.88 or newer (2021 edition). No system libraries beyond the
 platform default; the YARA engine and the terminal interface are both pure Rust.
+
+## Community
+
+There is a Discord server for triage walkthroughs, analysis help, and release
+announcements: [join the server](https://discord.gg/hU5NYVfzd).
 
 ## Contributing
 

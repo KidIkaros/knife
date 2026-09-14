@@ -1344,9 +1344,13 @@ fn cmd_tui(file: &str, db_path: Option<&str>) -> Result<()> {
         );
     }
     let title = basename(file).to_string();
+    let source = tui::TargetSource {
+        path: std::path::PathBuf::from(file),
+        db_path: db_path.map(std::path::PathBuf::from),
+    };
     // The analysis itself runs inside `tui::run`, on a worker thread, so the
     // animated splash plays while the engine works instead of after it.
-    tui::run(bin, bytes, db, title)
+    tui::run(source, bin, bytes, db, title)
 }
 
 fn cmd_db(file: &str, db_path: Option<&str>, as_json: bool) -> Result<()> {
