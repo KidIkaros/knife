@@ -57,6 +57,17 @@ keeps the old session untouched.
 A target with no recovered functions is no longer refused: the workspace opens
 on the first mapped bytes and the section, string and import catalogs stay
 available. Tiny terminals get a resize notice instead of clipped fragments.
+`:split` clones the listing into a second column and `:compare F` pins a
+function there, so two functions sit side by side while the active pane keeps
+roaming. Tab walks between the columns; each keeps its own cursor, view mode
+and back/forward history, and `:only` (or `:close` on the listing) collapses
+back to one. The references pane hides while split.
+Running `knife` with no arguments opens a file explorer instead of a usage
+screen: directories first, PE/ELF/Mach-O badges sniffed from the magic bytes,
+`/` filters by name, and Enter hands the file to the workspace. Quitting the
+workspace returns to the explorer in the same directory, so a folder of
+samples is one keypress per file. `knife tui` without a file and
+`knife <directory>` do the same.
 `:next` and `:previous` open adjacent recovered functions in static-address order,
 without wrapping or changing the function filter. `:history` browses past/forward
 locations; `/` filters and Enter restores the saved view/cursor as a new navigation

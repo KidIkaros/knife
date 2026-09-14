@@ -16,6 +16,12 @@ complete query parity is still stabilization work.
 - Explicit goto address modes: `off:`/`file:` file offsets, `va:` static VAs.
 - Inspection of targets with no recovered functions, and a resize notice
   instead of clipped fragments below a 24x6 terminal.
+- Split listing: `:split` clones the active column, `:compare F` pins a
+  function there, Tab walks both, and each column keeps its own cursor,
+  view mode and history; `:only` collapses back to one.
+- File explorer: bare `knife`, `knife tui` without a file and `knife <dir>`
+  open a branded directory browser with PE/ELF/Mach-O badges from magic
+  bytes; quitting the workspace returns to it.
 
 ## Next work
 

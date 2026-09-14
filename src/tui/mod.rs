@@ -8,6 +8,7 @@
 
 mod browser;
 mod command;
+pub mod explorer;
 mod layout;
 mod navigation;
 /// Deterministic demo recorder for the README animation. Dev-only, so it
@@ -373,6 +374,36 @@ fn load_target(source: &TargetSource) -> Result<WorkResult> {
     })
 }
 
+/// One listing pane's full state: what it shows, where its cursor is, and its
+/// own back/forward stacks. The active pane's state lives directly on `App`
+/// (so the existing code keeps working); the inactive pane's lives here and
+/// the two are swapped when the user switches columns.
+#[derive(Debug, Clone, Default)]
+pub struct ListingView {
+    pub cur: Option<u64>,
+    pub lines: Vec<Line>,
+    pub cursor: usize,
+    view_positions: navigation::ViewPositions,
+    pub pseudo: bool,
+    pub graph: bool,
+    pub pseudo_lines: Vec<crate::analysis::ir::Line>,
+    pub history: Vec<NavigationLocation>,
+    pub future: Vec<NavigationLocation>,
+    pub search: String,
+}
+
+/// A borrowed snapshot of one listing column, so the renderer can draw either
+/// pane without caring which one currently owns the active state.
+pub struct ListingViewRef<'a> {
+    pub cur: Option<u64>,
+    pub lines: &'a [Line],
+    pub cursor: usize,
+    pub pseudo: bool,
+    pub graph: bool,
+    pub pseudo_lines: &'a [crate::analysis::ir::Line],
+    pub focused: bool,
+}
+
 pub struct App {
     // ── the target ──
     pub bin: Binary,
@@ -390,7 +421,7 @@ pub struct App {
     pub filter: String,
     pub browser: Option<browser::Browser>,
 
-    // ── listing ──
+    // ── listing (the ACTIVE pane; see `other` for the inactive column) ──
     pub cur: Option<u64>,
     pub lines: Vec<Line>,
     pub cursor: usize,
@@ -403,6 +434,16 @@ pub struct App {
     /// The decompiled lines for the current function, rebuilt when it changes
     /// while pseudocode is showing.
     pub pseudo_lines: Vec<crate::analysis::ir::Line>,
+
+    // ── split view ──
+    /// Two listing columns side by side. The references pane is hidden while
+    /// split; the second column takes its slot.
+    pub split: bool,
+    /// Which column currently owns the active state: left when true.
+    pub active_is_left: bool,
+    /// The inactive column's full state; swapped with the active fields when
+    /// the user switches panes.
+    pub other: ListingView,
 
     // ── the rest ──
     pub focus: Focus,
@@ -502,6 +543,9 @@ impl App {
             pseudo: false,
             graph: false,
             pseudo_lines: Vec::new(),
+            split: false,
+            active_is_left: true,
+            other: ListingView::default(),
             focus: Focus::Functions,
             pane_settings: layout::PaneSettings::default(),
             prompt: None,
@@ -859,6 +903,207 @@ impl App {
     /// test, kept separate from the function-lookup so the two never blur.
     fn is_mapped(&self, addr: u64) -> bool {
         engine::va_to_off(&self.bin, self.base, addr).is_some()
+    }
+
+    // ── split view ──
+
+    /// The active column as the renderer wants it: the fields on `App`
+    /// themselves, marked focused when the listing has input focus.
+    pub fn active_view(&self) -> ListingViewRef<'_> {
+        ListingViewRef {
+            cur: self.cur,
+            lines: &self.lines,
+            cursor: self.cursor,
+            pseudo: self.pseudo,
+            graph: self.graph,
+            pseudo_lines: &self.pseudo_lines,
+            focused: self.focus == Focus::Listing,
+        }
+    }
+
+    /// The inactive column, drawn without the focus marker.
+    pub fn other_view(&self) -> ListingViewRef<'_> {
+        ListingViewRef {
+            cur: self.other.cur,
+            lines: &self.other.lines,
+            cursor: self.other.cursor,
+            pseudo: self.other.pseudo,
+            graph: self.other.graph,
+            pseudo_lines: &self.other.pseudo_lines,
+            focused: false,
+        }
+    }
+
+    /// Exchange the two columns' state. The now-active pane is rebuilt from
+    /// the current analysis so edits made while it was inactive show up.
+    fn swap_views(&mut self) {
+        std::mem::swap(&mut self.cur, &mut self.other.cur);
+        std::mem::swap(&mut self.lines, &mut self.other.lines);
+        std::mem::swap(&mut self.cursor, &mut self.other.cursor);
+        std::mem::swap(&mut self.view_positions, &mut self.other.view_positions);
+        std::mem::swap(&mut self.pseudo, &mut self.other.pseudo);
+        std::mem::swap(&mut self.graph, &mut self.other.graph);
+        std::mem::swap(&mut self.pseudo_lines, &mut self.other.pseudo_lines);
+        std::mem::swap(&mut self.history, &mut self.other.history);
+        std::mem::swap(&mut self.future, &mut self.other.future);
+        std::mem::swap(&mut self.search, &mut self.other.search);
+        self.active_is_left = !self.active_is_left;
+        self.relist();
+    }
+
+    /// Clone the active pane into a second column at the same location.
+    pub fn split_clone(&mut self) {
+        if self.split {
+            self.status = "already split; :only returns to one listing".into();
+            return;
+        }
+        if self.cur.is_none() {
+            self.status = "open a function or a data view before splitting".into();
+            return;
+        }
+        self.other = ListingView {
+            cur: self.cur,
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+            view_positions: self.view_positions,
+            pseudo: self.pseudo,
+            graph: self.graph,
+            pseudo_lines: self.pseudo_lines.clone(),
+            history: self.history.clone(),
+            future: self.future.clone(),
+            search: self.search.clone(),
+        };
+        self.split = true;
+        self.active_is_left = true;
+        self.status = "split; Tab switches panes, :compare pins a function, :only closes".into();
+    }
+
+    /// Pin a function — the current one, or a selector's — into the other
+    /// column, so the active pane can roam while the pinned one stays put.
+    pub fn compare(&mut self, selector: Option<String>) {
+        let address = match selector.as_deref() {
+            Some(text) => match self.resolve_goto(text) {
+                Ok(address) => address,
+                Err(error) => {
+                    self.status = error.to_string();
+                    return;
+                }
+            },
+            None => match self.cur {
+                Some(address) => address,
+                None => {
+                    self.status = "open a function before comparing".into();
+                    return;
+                }
+            },
+        };
+        let Some(view) = self.build_listing_view(address) else {
+            self.status = format!("0x{address:x} has no listing to pin");
+            return;
+        };
+        self.other = view;
+        self.split = true;
+        self.status = format!(
+            "comparing against {}; Tab switches panes",
+            self.an.label(address)
+        );
+    }
+
+    /// Build a standalone listing column for an address: its function when
+    /// there is one, its mapped bytes otherwise.
+    fn build_listing_view(&self, address: u64) -> Option<ListingView> {
+        let target = self
+            .an
+            .find_function(address)
+            .or_else(|| self.an.function_at(address))
+            .map(|f| f.addr);
+        let (cur, lines) = if let Some(faddr) = target {
+            let f = self.an.find_function(faddr)?;
+            (
+                faddr,
+                listing::function(
+                    &self.an,
+                    f,
+                    &self.db,
+                    self.base,
+                    &self.strings,
+                    self.driver.as_ref().map(|d| &d.listing_hints),
+                ),
+            )
+        } else if self.is_mapped(address) {
+            (
+                address,
+                listing::data_view(&self.bin, self.base, &self.bytes, address),
+            )
+        } else {
+            return None;
+        };
+        let cursor = lines.iter().position(|l| l.addr() == address).unwrap_or(0);
+        Some(ListingView {
+            cur: Some(cur),
+            lines,
+            cursor,
+            ..Default::default()
+        })
+    }
+
+    /// Collapse to one listing, keeping whichever pane is active.
+    pub fn close_split(&mut self) {
+        if !self.split {
+            self.status = "not split".into();
+            return;
+        }
+        self.split = false;
+        self.other = ListingView::default();
+        self.focus = Focus::Listing;
+        self.status = "back to one listing".into();
+    }
+
+    /// Tab in split mode walks Functions → left listing → right listing and
+    /// back (and the reverse); the references pane is hidden while split, so
+    /// the cycle skips it.
+    fn cycle_split_focus(&mut self, reverse: bool) {
+        if reverse {
+            match self.focus {
+                Focus::Listing if !self.active_is_left => self.swap_views(),
+                Focus::Listing => {
+                    if self.pane_settings.functions {
+                        self.focus = Focus::Functions;
+                    } else {
+                        self.swap_views();
+                    }
+                }
+                _ => {
+                    self.focus = Focus::Listing;
+                    if self.active_is_left {
+                        self.swap_views();
+                    }
+                }
+            }
+        } else {
+            match self.focus {
+                Focus::Functions => {
+                    self.focus = Focus::Listing;
+                    if !self.active_is_left {
+                        self.swap_views();
+                    }
+                }
+                Focus::Listing if self.active_is_left => self.swap_views(),
+                Focus::Listing => {
+                    if self.pane_settings.functions {
+                        self.focus = Focus::Functions;
+                    } else {
+                        self.swap_views();
+                    }
+                }
+                Focus::Xrefs => {
+                    self.focus = Focus::Listing;
+                    if !self.active_is_left {
+                        self.swap_views();
+                    }
+                }
+            }
+        }
     }
 
     pub fn back(&mut self) {
@@ -1978,6 +2223,10 @@ impl App {
         self.dsel = 0;
         self.tsel = 0;
         self.search.clear();
+        // The other column belongs to the old image as surely as the history
+        // does; the workspace comes back as one listing.
+        self.split = false;
+        self.other = ListingView::default();
         // Pane sizes, focus, filter and the left-pane mode survive: they are
         // how the analyst arranged their desk, not facts about the target.
         self.refilter();
@@ -2107,6 +2356,10 @@ impl App {
                 }
                 let reverse =
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                if self.split {
+                    self.cycle_split_focus(reverse);
+                    return;
+                }
                 self.focus = if reverse {
                     match self.focus {
                         Focus::Listing if self.pane_settings.functions => Focus::Functions,
@@ -2220,7 +2473,13 @@ impl App {
                     }
                 );
             }
-            KeyCode::Char('x') => self.toggle_refs(),
+            KeyCode::Char('x') => {
+                if self.split {
+                    self.status = "references are hidden while split; :only closes a pane".into();
+                } else {
+                    self.toggle_refs();
+                }
+            }
             KeyCode::Char('d') => {
                 self.toggle_pseudo();
                 self.focus = Focus::Listing;
@@ -2409,12 +2668,23 @@ impl App {
 
     // ── mouse ──
 
+    /// The rect of the column that owns the active listing state: the left
+    /// column normally, the right one after a pane switch in split mode.
+    fn active_listing_rect(&self, panes: &layout::Panes) -> ratatui::layout::Rect {
+        if self.split && !self.active_is_left {
+            panes.listing_right
+        } else {
+            panes.listing
+        }
+    }
+
     /// The pane a terminal position belongs to, given the size stored before
     /// the last frame. The layout mirrors `render::draw`, kept in one place so
     /// the two cannot disagree.
     pub fn pane_at(&self, column: u16, row: u16) -> Option<(Focus, usize)> {
         let panes = self.panes(ratatui::layout::Rect::new(0, 0, self.dims.0, self.dims.1));
         let point = ratatui::layout::Position::new(column, row);
+        let listing_rect = self.active_listing_rect(&panes);
         let (focus, area, len, selection) = if panes.functions.contains(point) {
             let (len, selection) = match self.left {
                 LeftView::Functions => (self.order.len(), self.sel),
@@ -2430,10 +2700,10 @@ impl App {
                 self.xref_rows().len(),
                 self.xsel,
             )
-        } else if panes.listing.contains(point) {
+        } else if listing_rect.contains(point) {
             (
                 Focus::Listing,
-                panes.listing,
+                listing_rect,
                 self.listing_len(),
                 self.cursor,
             )
@@ -2460,7 +2730,23 @@ impl App {
         Some((focus, idx.min(len.saturating_sub(1))))
     }
 
+    /// In split mode, a click or wheel turn over the inactive column makes it
+    /// active first, so the pane under the mouse is the one that responds.
+    fn activate_column_at(&mut self, column: u16, row: u16) {
+        if !self.split {
+            return;
+        }
+        let panes = self.panes(ratatui::layout::Rect::new(0, 0, self.dims.0, self.dims.1));
+        let point = ratatui::layout::Position::new(column, row);
+        let over_right = panes.listing_right.contains(point);
+        if over_right == self.active_is_left && (over_right || panes.listing.contains(point)) {
+            self.focus = Focus::Listing;
+            self.swap_views();
+        }
+    }
+
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        self.activate_column_at(m.column, m.row);
         match m.kind {
             MouseEventKind::ScrollUp => self.step(-1),
             MouseEventKind::ScrollDown => self.step(1),
@@ -4686,6 +4972,143 @@ mod tests {
         app.reload();
         assert!(!app.is_reloading());
         assert!(app.status.contains("no on-disk target"), "{}", app.status);
+    }
+
+    #[test]
+    fn split_clones_the_pane_and_the_columns_stay_independent() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.split_clone();
+        assert!(app.split);
+        assert_eq!(app.other.cur, app.cur, "the clone starts at the same spot");
+
+        app.open(0x100b, true);
+        assert_eq!(app.cur, Some(0x100b), "the active pane roams");
+        assert_eq!(app.other.cur, Some(0x1000), "the pinned pane stays put");
+        assert_eq!(app.other.history.len(), 0, "its own stack is not shared");
+        assert_eq!(app.history.len(), 1, "the active pane has its own stack");
+    }
+
+    #[test]
+    fn tab_walks_both_columns_and_the_wrap_is_stable() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.split_clone();
+        app.open(0x100b, true);
+        assert_eq!(app.focus, Focus::Functions);
+
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        app.on_key(tab);
+        assert_eq!(app.focus, Focus::Listing);
+        assert!(
+            app.active_is_left,
+            "functions hands over to the left column"
+        );
+        assert_eq!(app.cur, Some(0x100b));
+
+        app.on_key(tab);
+        assert!(app.split);
+        assert!(!app.active_is_left, "the right column takes the input");
+        assert_eq!(
+            app.cur,
+            Some(0x1000),
+            "the columns swapped, not the content"
+        );
+
+        app.on_key(tab);
+        assert_eq!(app.focus, Focus::Functions, "the cycle wraps to functions");
+        assert_eq!(app.cur, Some(0x1000), "the right column is still active");
+
+        app.on_key(tab);
+        assert!(app.active_is_left, "and the left column comes back");
+        assert_eq!(app.cur, Some(0x100b));
+    }
+
+    #[test]
+    fn compare_pins_a_function_in_the_other_column() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.compare(Some("0x100b".into()));
+        assert!(app.split);
+        assert_eq!(app.cur, Some(0x1000), "the active pane is untouched");
+        assert_eq!(app.other.cur, Some(0x100b));
+        assert!(
+            app.other
+                .lines
+                .iter()
+                .any(|line| matches!(line, Line::Insn { addr: 0x100b, .. })),
+            "the pinned column shows the requested function"
+        );
+
+        app.compare(Some("no_such_thing".into()));
+        assert!(
+            app.status.contains("no symbol or address"),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.other.cur, Some(0x100b), "a failed pin changes nothing");
+    }
+
+    #[test]
+    fn only_keeps_the_active_column() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.split_clone();
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.active_is_left, "the right column is active");
+        app.close_split();
+        assert!(!app.split);
+        assert_eq!(app.cur, Some(0x1000), "the active column's state survives");
+        assert!(app.other.cur.is_none(), "the other column is gone");
+    }
+
+    #[test]
+    fn references_are_guarded_while_split() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.split_clone();
+        app.execute_command("xrefs");
+        assert!(app.status.contains("hidden while split"), "{}", app.status);
+        assert_ne!(app.focus, Focus::Xrefs);
+        app.on_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.status.contains("hidden while split"), "{}", app.status);
+    }
+
+    #[test]
+    fn reload_collapses_the_split() {
+        let (target, db_path) = temp_source("split");
+        std::fs::write(&target, crate::formats::fixture::elf_with_plt_call()).unwrap();
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.split_clone();
+        assert!(app.split);
+        app.source = Some(TargetSource {
+            path: target.clone(),
+            db_path: Some(db_path.clone()),
+        });
+        app.reload();
+        wait_for_reload(&mut app);
+        assert!(!app.split, "the other column belonged to the old image");
+        assert!(app.other.cur.is_none());
+        std::fs::remove_dir_all(target.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_split_view_renders_two_columns() {
+        let mut app = two_functions();
+        app.open(0x1000, false);
+        app.compare(Some("0x100b".into()));
+        let out = rendered(&mut app, 110, 30);
+        assert!(out.contains("entry @ 0x1000"), "the left column is drawn");
+        assert!(
+            out.contains("sub_100b @ 0x100b"),
+            "the pinned column is drawn"
+        );
+        assert!(
+            !out.contains("xrefs to"),
+            "the references pane is hidden while split"
+        );
     }
 
     #[test]

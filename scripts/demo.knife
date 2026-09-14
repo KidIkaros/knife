@@ -36,3 +36,17 @@ key :
 type functions
 key enter
 hold 24
+key :
+type compare
+key enter
+hold 30
+key tab
+hold 24
+key :
+type next
+key enter
+hold 30
+key :
+type only
+key enter
+hold 12

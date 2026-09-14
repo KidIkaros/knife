@@ -26,6 +26,8 @@ pub struct Panes {
     pub footer: Rect,
     pub functions: Rect,
     pub listing: Rect,
+    /// The second listing column in split mode; a zero rect otherwise.
+    pub listing_right: Rect,
     pub references: Rect,
     pub detail: Rect,
 }
@@ -41,16 +43,47 @@ impl App {
             ])
             .split(area);
         let left = self.pane_settings.functions || self.focus == Focus::Functions;
+        let detail_height = match self.left {
+            LeftView::Sinks if !self.sinks.is_empty() => 6,
+            LeftView::Types => 7,
+            _ => 0,
+        };
+        let left_width = if left {
+            self.pane_settings.left_width.min(area.width / 2)
+        } else {
+            0
+        };
+        // Split mode: the references pane's slot becomes the second listing,
+        // so the two columns always sit side by side regardless of width.
+        if self.split {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(left_width),
+                    Constraint::Min(1),
+                    Constraint::Min(1),
+                ])
+                .split(rows[1]);
+            let center = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(detail_height)])
+                .split(cols[1]);
+            return Panes {
+                header: rows[0],
+                footer: rows[2],
+                functions: cols[0],
+                listing: center[0],
+                listing_right: cols[2],
+                references: Rect::default(),
+                detail: center[1],
+            };
+        }
         let refs = self.pane_settings.references || self.focus == Focus::Xrefs;
         let wide = area.width >= 132;
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(if left {
-                    self.pane_settings.left_width.min(area.width / 2)
-                } else {
-                    0
-                }),
+                Constraint::Length(left_width),
                 Constraint::Min(1),
                 Constraint::Length(if refs && wide {
                     self.pane_settings.reference_width.min(area.width / 3)
@@ -59,11 +92,6 @@ impl App {
                 }),
             ])
             .split(rows[1]);
-        let detail_height = match self.left {
-            LeftView::Sinks if !self.sinks.is_empty() => 6,
-            LeftView::Types => 7,
-            _ => 0,
-        };
         let center = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -77,6 +105,7 @@ impl App {
             footer: rows[2],
             functions: cols[0],
             listing: center[0],
+            listing_right: Rect::default(),
             detail: center[1],
             references: if wide { cols[2] } else { center[2] },
         }
@@ -87,6 +116,11 @@ impl App {
             Focus::Functions => self.pane_settings.functions = false,
             Focus::Xrefs => self.pane_settings.references = false,
             Focus::Listing => {
+                if self.split {
+                    // Closing the focused column keeps the other one.
+                    self.close_split();
+                    return;
+                }
                 self.status = "listing stays open; focus a side pane to close it".into();
                 return;
             }

@@ -26,6 +26,9 @@ pub enum Command {
     Widen,
     Narrow,
     Reload,
+    Split,
+    Only,
+    Compare(Option<String>),
     Help,
     Quit,
 }
@@ -60,6 +63,9 @@ pub const NAMES: &[&str] = &[
     "widen",
     "narrow",
     "reload",
+    "split",
+    "only",
+    "compare",
     "help",
     "quit",
 ];
@@ -103,6 +109,9 @@ impl super::App {
                 self.browser = None;
                 self.left = LeftView::Types;
                 self.focus = Focus::Functions;
+            }
+            Command::Xrefs | Command::Callers | Command::Callees if self.split => {
+                self.status = "references are hidden while split; :only closes a pane".into();
             }
             Command::Xrefs => {
                 self.reference_anchor = Some(self.xref_at());
@@ -210,6 +219,9 @@ impl super::App {
             }
             Command::Catalog(catalog) => self.show_catalog(catalog),
             Command::Reload => self.reload(),
+            Command::Split => self.split_clone(),
+            Command::Only => self.close_split(),
+            Command::Compare(selector) => self.compare(selector),
             Command::Help => self.help = true,
             Command::Quit => self.quit = true,
         }
@@ -263,6 +275,13 @@ pub fn parse(input: &str) -> Result<Command, String> {
         "widen" => no_args(Command::Widen),
         "narrow" => no_args(Command::Narrow),
         "reload" => no_args(Command::Reload),
+        "split" => no_args(Command::Split),
+        "only" => no_args(Command::Only),
+        "compare" => Ok(Command::Compare(if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_owned())
+        })),
         "focus" => match rest {
             "functions" => Ok(Command::Focus(super::Focus::Functions)),
             "listing" => Ok(Command::Focus(super::Focus::Listing)),
@@ -344,6 +363,19 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_commands_parse_with_and_without_arguments() {
+        assert_eq!(parse("split").unwrap(), Command::Split);
+        assert_eq!(parse("only").unwrap(), Command::Only);
+        assert_eq!(parse("compare").unwrap(), Command::Compare(None));
+        assert_eq!(
+            parse("compare main").unwrap(),
+            Command::Compare(Some("main".into()))
+        );
+        assert!(parse("split now").is_err());
+        assert!(complete("spl").contains(&"split"));
+    }
 
     #[test]
     fn commands_preserve_text_and_reject_invalid_shapes() {

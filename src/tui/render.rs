@@ -16,38 +16,38 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-fn accent() -> Color {
+pub(crate) fn accent() -> Color {
     Color::Rgb(0xf0, 0xf0, 0xf0)
 }
 fn critical() -> Color {
     Color::Rgb(0xff, 0xff, 0xff)
 }
-fn muted() -> Color {
+pub(crate) fn muted() -> Color {
     Color::Rgb(0xc0, 0xc0, 0xc0)
 }
-fn faint() -> Color {
+pub(crate) fn faint() -> Color {
     Color::Rgb(0x88, 0x88, 0x88)
 }
-fn mint() -> Color {
+pub(crate) fn mint() -> Color {
     Color::Rgb(0xd8, 0xd8, 0xd8)
 }
-fn amber() -> Color {
+pub(crate) fn amber() -> Color {
     Color::Rgb(0xe0, 0xe0, 0xe0)
 }
-fn canvas() -> Color {
+pub(crate) fn canvas() -> Color {
     Color::Rgb(0x00, 0x00, 0x00)
 }
-fn panel() -> Color {
+pub(crate) fn panel() -> Color {
     Color::Rgb(0x12, 0x12, 0x12)
 }
-fn selected() -> Style {
+pub(crate) fn selected() -> Style {
     Style::default()
         .fg(Color::Rgb(0xff, 0xff, 0xff))
         .bg(Color::Rgb(0x38, 0x38, 0x38))
         .add_modifier(Modifier::BOLD)
 }
 
-fn pane(title: &str, focused: bool) -> Block<'_> {
+pub(crate) fn pane(title: &str, focused: bool) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -113,16 +113,28 @@ pub fn draw(f: &mut Frame, app: &App) {
     if panes.functions.width > 0 {
         functions(f, panes.functions, app);
     }
-    listing(f, panes.listing, app);
+    if app.split {
+        // Stable columns: the active state is drawn in whichever column owns
+        // it, so content never jumps sides on a pane switch.
+        let (left, right) = if app.active_is_left {
+            (app.active_view(), app.other_view())
+        } else {
+            (app.other_view(), app.active_view())
+        };
+        listing(f, panes.listing, app, &left);
+        listing(f, panes.listing_right, app, &right);
+    } else {
+        listing(f, panes.listing, app, &app.active_view());
+        if panes.references.width > 0 && panes.references.height > 0 {
+            xrefs(f, panes.references, app);
+        }
+    }
     if panes.detail.height > 0 {
         if app.left == LeftView::Types {
             type_detail(f, panes.detail, app);
         } else {
             evidence(f, panes.detail, app);
         }
-    }
-    if panes.references.width > 0 && panes.references.height > 0 {
-        xrefs(f, panes.references, app);
     }
     footer(f, panes.footer, app);
 
@@ -471,27 +483,27 @@ fn type_browser(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn listing(f: &mut Frame, area: Rect, app: &App) {
-    if app.graph {
-        function_graph(f, area, app);
+fn listing(f: &mut Frame, area: Rect, app: &App, view: &super::ListingViewRef) {
+    if view.graph {
+        function_graph(f, area, app, view);
         return;
     }
-    if app.pseudo {
-        pseudo(f, area, app);
+    if view.pseudo {
+        pseudo(f, area, app, view);
         return;
     }
-    let focused = app.focus == Focus::Listing;
-    let title = match app.cur {
+    let focused = view.focused;
+    let title = match view.cur {
         Some(a) => format!(
             "{} @ 0x{:x}{}",
             app.an.label(a),
             a + app.an.display_base,
-            position(app.cursor, app.lines.len())
+            position(view.cursor, view.lines.len())
         ),
         None => "listing".into(),
     };
 
-    let items: Vec<ListItem> = app
+    let items: Vec<ListItem> = view
         .lines
         .iter()
         .map(|l| match l {
@@ -544,8 +556,8 @@ fn listing(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let mut state = ListState::default();
-    if !app.lines.is_empty() {
-        state.select(Some(app.cursor));
+    if !view.lines.is_empty() {
+        state.select(Some(view.cursor));
     }
     f.render_stateful_widget(
         List::new(items)
@@ -557,9 +569,9 @@ fn listing(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn function_graph(f: &mut Frame, area: Rect, app: &App) {
-    let focused = app.focus == Focus::Listing;
-    let Some(function) = app.cur.and_then(|address| app.an.find_function(address)) else {
+fn function_graph(f: &mut Frame, area: Rect, app: &App, view: &super::ListingViewRef) {
+    let focused = view.focused;
+    let Some(function) = view.cur.and_then(|address| app.an.find_function(address)) else {
         f.render_widget(
             Paragraph::new(" Open a recovered function, then press f.")
                 .style(Style::default().fg(faint()))
@@ -578,7 +590,7 @@ fn function_graph(f: &mut Frame, area: Rect, app: &App) {
         "function graph · {} · {} blocks{} · arrows move · ↵ opens",
         function.name,
         function.blocks.len(),
-        position(app.cursor, function.blocks.len())
+        position(view.cursor, function.blocks.len())
     );
     f.render_widget(pane(&title, focused), area);
     let inner = Rect::new(
@@ -604,8 +616,8 @@ fn function_graph(f: &mut Frame, area: Rect, app: &App) {
         inspector_height,
     );
     let layout = graph_layout(function, map.width);
-    let offset = graph_view_offset(&layout, app.cursor, map.height);
-    let horizontal = graph_horizontal_offset(&layout, app.cursor, map.width);
+    let offset = graph_view_offset(&layout, view.cursor, map.height);
+    let horizontal = graph_horizontal_offset(&layout, view.cursor, map.width);
 
     // Edges are routed before nodes so node labels remain crisp where paths
     // meet. Back/cross edges stay on the source row and carry a return marker.
@@ -688,7 +700,7 @@ fn function_graph(f: &mut Frame, area: Rect, app: &App) {
         }
         let block = &function.blocks[node.index];
         let terminal = block.succ.is_empty();
-        let is_selected = node.index == app.cursor;
+        let is_selected = node.index == view.cursor;
         let text = if is_selected {
             format!("▶B{:02}◀", node.index)
         } else {
@@ -721,7 +733,7 @@ fn function_graph(f: &mut Frame, area: Rect, app: &App) {
     }
 
     if inspector.height > 0 {
-        let selected_index = app.cursor.min(function.blocks.len().saturating_sub(1));
+        let selected_index = view.cursor.min(function.blocks.len().saturating_sub(1));
         if let Some(block) = function.blocks.get(selected_index) {
             let calls = block
                 .insns
@@ -892,19 +904,19 @@ fn pseudo_spans(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn pseudo(f: &mut Frame, area: Rect, app: &App) {
-    let focused = app.focus == Focus::Listing;
-    let title = match app.cur {
+fn pseudo(f: &mut Frame, area: Rect, app: &App, view: &super::ListingViewRef) {
+    let focused = view.focused;
+    let title = match view.cur {
         Some(a) => format!(
             "pseudocode · {} @ 0x{:x}{}",
             app.an.label(a),
             a + app.an.display_base,
-            position(app.cursor, app.pseudo_lines.len())
+            position(view.cursor, view.pseudo_lines.len())
         ),
         None => "pseudocode".into(),
     };
 
-    let mut items: Vec<ListItem> = app
+    let mut items: Vec<ListItem> = view
         .pseudo_lines
         .iter()
         .map(|l| {
@@ -933,8 +945,8 @@ fn pseudo(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let mut state = ListState::default();
-    if !app.pseudo_lines.is_empty() {
-        state.select(Some(app.cursor.min(app.pseudo_lines.len() - 1)));
+    if !view.pseudo_lines.is_empty() {
+        state.select(Some(view.cursor.min(view.pseudo_lines.len() - 1)));
     }
     f.render_stateful_widget(
         List::new(items)
@@ -1204,15 +1216,14 @@ fn help(f: &mut Frame, area: Rect) {
     let text = vec![
         "",
         "  ↑ ↓ / j k      move            Tab/Shift+Tab  next/previous pane",
-        "                  (functions / listing / xrefs)",
         "  pgup pgdn      page            home end       first / last",
         "  mouse          wheel scrolls, click picks a pane and an entry",
-        "  ↵              open a function, follow the call under the cursor,",
-        "                 or jump to a reference in the xrefs pane; following a",
-        "                 string operand opens its bytes as a hex dump",
+        "  ↵              open, follow the call under the cursor, or jump to a",
+        "                 reference; a string operand opens its bytes as a dump",
         "  Backspace      back to where you followed from",
         "  Alt+Left/Right back/forward, restoring view and cursor",
         "  :next/previous adjacent function in static-address order (no wrapping)",
+        "  :split/:only   two listing columns; :compare F pins a function there",
         "  :history       browse/filter saved past and forward view locations",
         "  :focus PANE    functions, listing, references (reveals closed pane)",
         "  :close         close focused side pane; :widen/:narrow adjust width",
@@ -1280,7 +1291,7 @@ fn position(cursor: usize, total: usize) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         format!("{s:<max$}")
     } else if max == 0 {

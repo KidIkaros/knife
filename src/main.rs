@@ -38,8 +38,9 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pdb: Option<String>,
 
+    /// No subcommand opens the file explorer.
     #[command(subcommand)]
-    cmd: Command,
+    cmd: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -301,7 +302,8 @@ enum Command {
     /// Show everything stored for a binary.
     Db { file: String },
     /// Open the interactive view: functions, listing, xrefs, naming and notes.
-    Tui { file: String },
+    /// Without a file, opens the explorer to pick one.
+    Tui { file: Option<String> },
     /// Run a Model Context Protocol server over stdio (tools for agents).
     Mcp {
         /// Bind a binary up front, so tool calls need not name a path.
@@ -375,11 +377,25 @@ fn real_main() -> Result<()> {
     // JSON. Refusing is the point: a script that asked for JSON and received a
     // shell completion script — or that hung because it had opened an
     // interactive UI — learned nothing at all from a zero exit.
-    if let Some(name) = cli.json.then(|| without_json_form(&cli.cmd)).flatten() {
-        anyhow::bail!("`{name}` has no JSON form; run it without --json");
+    if cli.json {
+        let name = match &cli.cmd {
+            None => Some("explorer"),
+            Some(cmd) => without_json_form(cmd),
+        };
+        if let Some(name) = name {
+            anyhow::bail!("`{name}` has no JSON form; run it without --json");
+        }
     }
 
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        return cmd_explorer(cli.db.as_deref(), None);
+    };
+    match cmd {
+        // A directory handed to `info` (also the bare `knife <dir>` shorthand)
+        // is an explorer session, not a triage target.
+        Command::Info { file, rules: _ } if std::path::Path::new(&file).is_dir() => {
+            cmd_explorer(cli.db.as_deref(), Some(&file))
+        }
         Command::Info { file, rules } => cmd_info(&file, rules.as_deref(), cli.json),
         Command::Sections { file, details } => {
             if details {
@@ -590,7 +606,13 @@ fn real_main() -> Result<()> {
             cli.db.as_deref(),
         ),
         Command::Db { file } => cmd_db(&file, cli.db.as_deref(), cli.json),
-        Command::Tui { file } => cmd_tui(&file, cli.db.as_deref()),
+        Command::Tui { file } => match file {
+            Some(file) if std::path::Path::new(&file).is_dir() => {
+                cmd_explorer(cli.db.as_deref(), Some(&file))
+            }
+            Some(file) => cmd_tui(&file, cli.db.as_deref()),
+            None => cmd_explorer(cli.db.as_deref(), None),
+        },
         Command::Mcp { file } => mcp::run(file),
         Command::Funcs { file, by_refs } => cmd_funcs(&file, by_refs, cli.json, cli.db.as_deref()),
         Command::Hex { file, off, len } => cmd_hex(&file, off, len),
@@ -1325,6 +1347,29 @@ fn cmd_type_library(
         },
     )?;
     Ok(())
+}
+
+/// The explorer loop: pick a target, open the workspace, and come back here
+/// when it closes. The explorer resumes in the last target's directory, so
+/// walking a samples folder is one keypress per file. A target that fails to
+/// load reports the error, then the explorer comes back instead of ending
+/// the session.
+fn cmd_explorer(db_path: Option<&str>, start: Option<&str>) -> Result<()> {
+    let mut dir = match start {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::env::current_dir().context("cannot read the current directory")?,
+    };
+    loop {
+        let Some(target) = tui::explorer::run(&dir)? else {
+            return Ok(());
+        };
+        if let Some(parent) = target.parent() {
+            dir = parent.to_path_buf();
+        }
+        if let Err(error) = cmd_tui(target.to_string_lossy().as_ref(), db_path) {
+            eprintln!("{} {error:#}", "error:".style(red()).bold());
+        }
+    }
 }
 
 fn cmd_tui(file: &str, db_path: Option<&str>) -> Result<()> {
@@ -3725,19 +3770,31 @@ mod tests {
     #[test]
     fn call_reference_commands_require_explicit_function_selectors() {
         assert!(
-            matches!(Cli::try_parse_from(["knife", "callers", "target.exe", "--function", "entry"]).unwrap().cmd,
+            matches!(Cli::try_parse_from(["knife", "callers", "target.exe", "--function", "entry"]).unwrap().cmd.unwrap(),
             Command::Callers { function, .. } if function == "entry")
         );
         assert!(
-            matches!(Cli::try_parse_from(["knife", "callees", "target.exe", "--func", "0x1000", "--json"]).unwrap().cmd,
+            matches!(Cli::try_parse_from(["knife", "callees", "target.exe", "--func", "0x1000", "--json"]).unwrap().cmd.unwrap(),
             Command::Callees { function, .. } if function == "0x1000")
         );
         assert!(Cli::try_parse_from(["knife", "callees", "target.exe"]).is_err());
     }
 
     #[test]
+    fn a_bare_invocation_and_a_bare_tui_open_the_explorer() {
+        assert!(Cli::try_parse_from(["knife"]).unwrap().cmd.is_none());
+        assert!(
+            matches!(
+                Cli::try_parse_from(["knife", "tui"]).unwrap().cmd.unwrap(),
+                Command::Tui { file: None }
+            ),
+            "tui without a file is an explorer session"
+        );
+    }
+
+    #[test]
     fn commands_without_a_json_form_are_named_and_the_rest_are_not() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().cmd;
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().cmd.unwrap();
         // `--json` is global, so it reaches these; they have no JSON to give
         // and must say so rather than print something else and exit zero.
         assert_eq!(
@@ -3858,7 +3915,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            field.cmd,
+            field.cmd.unwrap(),
             Command::Field {
                 type_name,
                 offset,
@@ -3881,7 +3938,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            binding.cmd,
+            binding.cmd.unwrap(),
             Command::Type {
                 func,
                 base,
@@ -3902,7 +3959,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            variable.cmd,
+            variable.cmd.unwrap(),
             Command::Var {
                 func,
                 base,
@@ -3927,7 +3984,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            prototype.cmd,
+            prototype.cmd.unwrap(),
             Command::Proto {
                 func,
                 returns: Some(returns),
@@ -3949,7 +4006,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            library.cmd,
+            library.cmd.unwrap(),
             Command::TypeLib {
                 import: Some(path),
                 export: None,
@@ -3978,7 +4035,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            cfg.cmd,
+            cfg.cmd.unwrap(),
             Command::Graph {
                 func: Some(func),
                 dot: true,
@@ -3999,7 +4056,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            calls.cmd,
+            calls.cmd.unwrap(),
             Command::Graph {
                 func: None,
                 from,
@@ -4023,7 +4080,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            stage.cmd,
+            stage.cmd.unwrap(),
             Command::Patch {
                 vaddr: Some(address),
                 off: None,
@@ -4045,7 +4102,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            clear.cmd,
+            clear.cmd.unwrap(),
             Command::Patch {
                 off: Some(offset),
                 clear: true,
@@ -4064,7 +4121,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            export.cmd,
+            export.cmd.unwrap(),
             Command::Patch {
                 export: Some(output),
                 force: true,
