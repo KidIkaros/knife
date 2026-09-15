@@ -1,8 +1,10 @@
-name: release
+name: publish
 
 on:
   push:
     tags: ["v*"]
+  # Manual fallback: `gh workflow run publish.yml --ref vX.Y.Z`.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,6 +23,8 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   ext: ".exe", fmt: zip }
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -37,27 +41,13 @@ jobs:
           else
             tar -czf "dist/${name}.tgz" -C staging .
           fi
-      # The notes are this release's CHANGELOG section. Without a body every
-      # matrix job asked GitHub to generate one and appended it, so the release
-      # for 1.7.0 went out with a compare link repeated four times and not one
-      # word about what had changed. Each job now writes the same body, so it
-      # does not matter which of them gets there first.
+      # The notes are this release's CHANGELOG section. Every matrix job
+      # writes the same body, so it does not matter which one gets there
+      # first; the awk lives in scripts/ because inline kept tripping the
+      # workflow loader.
       - name: release notes from the changelog
         shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
-            $0 == "## v" v { found = 1; next }
-            found && /^## v/ { exit }
-            found { print }
-          ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            echo "no CHANGELOG section for $GITHUB_REF_NAME" >&2
-            exit 1
-          fi
-          printf '
-**Full Changelog**: https://github.com/%s/compare/%s
-'             "$GITHUB_REPOSITORY" "$(git describe --abbrev=0 --tags "${GITHUB_REF_NAME}^" 2>/dev/null || echo '')...${GITHUB_REF_NAME}" >> notes.md
+        run: bash scripts/release-notes.sh "${GITHUB_REF_NAME#v}"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
