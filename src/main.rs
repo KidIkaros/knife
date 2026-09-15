@@ -47,25 +47,25 @@ struct Cli {
 enum Command {
     /// Full triage report (default).
     Info { file: String },
-    /// List sections/segments with entropy.
+    /// Sections and segments, with entropy.
     Sections {
         file: String,
         #[arg(long)]
         details: bool,
     },
-    /// Inspect the complete ELF file header (no function analysis).
+    /// ELF file header (no function analysis).
     Headers { file: String },
-    /// Inspect ELF program headers (segments).
+    /// ELF program headers.
     Segments { file: String },
     /// List imported libraries and functions.
     Imports { file: String },
     /// List exported symbols.
     Exports { file: String },
-    /// Capabilities inferred from imports/symbols.
+    /// Capabilities from imports/symbols.
     Caps { file: String },
-    /// Audit exploit mitigations (ASLR, NX, canaries, RELRO, CFG, ...).
+    /// Exploit mitigations (ASLR, NX, canaries, ...).
     Sec { file: String },
-    /// Dangerous-API call sites: the attack surface, with where each is called.
+    /// Dangerous-API call sites (the attack surface).
     Sinks {
         file: String,
         /// Only this class (memory, format, exec, alloc, stack, path, random,
@@ -76,7 +76,7 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Find likely bugs: sink call sites whose arguments look exploitable.
+    /// Sink call sites whose arguments look exploitable.
     Audit {
         file: String,
         /// Only show findings reachable from an entry point or export.
@@ -89,12 +89,11 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         min: usize,
     },
-    /// Extract indicators of compromise (defanged).
+    /// Indicators of compromise (defanged).
     Iocs { file: String },
     /// File hashes and imphash.
     Hashes { file: String },
-    /// Kernel-driver / BYOVD analysis: identity, devices & symlinks, IRP
-    /// dispatch, IOCTL surface, and kernel primitives with call sites.
+    /// Kernel-driver / BYOVD analysis.
     Drv {
         file: String,
         /// Only show primitives reachable from the entry point or an IRP
@@ -102,7 +101,7 @@ enum Command {
         #[arg(long)]
         reachable: bool,
     },
-    /// Disassemble (x86/x64, AArch64) from the entry point, a location, or a function.
+    /// Disassemble from an address or a function.
     Dis {
         file: String,
         #[arg(long, default_value_t = 40)]
@@ -117,14 +116,13 @@ enum Command {
         #[arg(long)]
         func: Option<String>,
     },
-    /// Pseudocode view of a function (x86/x64): lifted, with calls and their
-    /// arguments. Not a full decompiler; unmodelled instructions show as asm.
+    /// Pseudocode for one function.
     Pseudo {
         file: String,
         /// Function to lift, by name or address.
         func: String,
     },
-    /// Find what references a function, import, address, or string.
+    /// What references a function, import, or address.
     Xrefs {
         file: String,
         /// Function name, imported API, or address to look up.
@@ -133,19 +131,19 @@ enum Command {
         #[arg(long)]
         str: Option<String>,
     },
-    /// Recovered incoming call sites (including identified tail-call jumps).
+    /// Incoming call sites of a function.
     Callers {
         file: String,
         #[arg(long = "function", alias = "func")]
         function: String,
     },
-    /// Recovered outgoing call sites; unresolved indirect calls are not fabricated.
+    /// Outgoing call sites of a function.
     Callees {
         file: String,
         #[arg(long = "function", alias = "func")]
         function: String,
     },
-    /// Show how a sink is reached: call chains from entry points and exports.
+    /// Call chains from entry points to a sink.
     Paths {
         file: String,
         /// Function, imported API, or address to reach.
@@ -157,7 +155,7 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         max: usize,
     },
-    /// Export a function CFG or the recovered whole-program call graph.
+    /// Function CFG or whole-program call graph.
     Graph {
         file: String,
         /// Export this function's control-flow graph instead of the call graph.
@@ -184,7 +182,7 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Leave a note at an address; it shows up in the disassembly.
+    /// Annotate an address.
     Note {
         file: String,
         addr: String,
@@ -210,7 +208,7 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Bind a pseudocode pointer base to a reusable user type.
+    /// Bind a pseudocode base to a user type.
     Type {
         file: String,
         /// Function containing the base, by name or address.
@@ -224,7 +222,7 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Rename a recovered pseudocode register, argument, or local in one function.
+    /// Rename a pseudocode variable.
     Var {
         file: String,
         /// Function containing the recovered variable, by name or address.
@@ -238,7 +236,7 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Stage, inspect, clear, or export binary byte patches safely.
+    /// Stage and export binary byte patches.
     Patch {
         file: String,
         /// Patch location as a virtual address (PE accepts VA or RVA).
@@ -263,7 +261,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Set an exact persistent function prototype for pseudocode and calls.
+    /// Set a persistent function prototype.
     Proto {
         file: String,
         /// Function to describe, by name or address.
@@ -279,7 +277,7 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Export or import portable cross-binary structure layouts.
+    /// Share structure layouts between binaries.
     #[command(name = "typelib")]
     TypeLib {
         file: String,
@@ -295,16 +293,15 @@ enum Command {
     },
     /// Show everything stored for a binary.
     Db { file: String },
-    /// Open the interactive view: functions, listing, xrefs, naming and notes.
-    /// Without a file, opens the explorer to pick one.
+    /// Interactive view (functions, listing, xrefs).
     Tui { file: Option<String> },
-    /// Run a Model Context Protocol server over stdio (tools for agents).
+    /// Model Context Protocol server over stdio.
     Mcp {
         /// Bind a binary up front, so tool calls need not name a path.
         #[arg(long)]
         file: Option<String>,
     },
-    /// Recover and list functions (control-flow analysis, x86/x64).
+    /// Recovered functions.
     Funcs {
         file: String,
         /// Sort by incoming references instead of address.
@@ -325,14 +322,13 @@ enum Command {
         #[arg(long, default_value_t = 64)]
         buckets: usize,
     },
-    /// Scan for crypto constants, packer markers, and embedded formats.
+    /// Crypto constants, packers, embedded formats.
     Scan { file: String },
     /// List archive (.a/.lib) members.
     Ls { file: String },
-    /// Emit a shell completion script (bash, zsh, fish, powershell, elvish).
+    /// Shell completion script.
     Completions { shell: clap_complete::Shell },
-    /// Compare two binaries: functions, imports, and sections. Exit code 1
-    /// when anything changed.
+    /// Compare two binaries (exit 1 on change).
     Diff { a: String, b: String },
 }
 
