@@ -480,13 +480,22 @@ fn decode(raw: &[u8], ip: u64, bits: u32) -> Option<Instruction> {
 /// currently holds, so each `push` snapshots its argument's value at that point
 /// rather than the register's final value.
 /// How the flags a conditional jump will read were set. `Compare` is an explicit
-/// `cmp a, b`, so the condition is `a <op> b`; `Zero` is a `test` or a flag-
-/// setting arithmetic op (`dec`, `sub`, `and`, ...), whose result is compared
-/// against zero.
+/// `cmp a, b`, so the condition is `a <op> b`; `Zero` and its friends are a
+/// `test` or a flag-setting arithmetic op (`dec`, `sub`, `and`, ...), whose
+/// result is compared against zero — `ZeroClearsCf` and `NegResult` additionally
+/// pin down the carry flag, which `sbb` reads. `Bit` is a `bt`/`bts`/`btr`
+/// reading one bit into the carry flag; the recorded left side is
+/// `(value >> index) & 1`.
 #[derive(Clone, Copy, PartialEq)]
 enum FlagSrc {
     Compare,
     Zero,
+    /// A `test`/`and`/`or`/`xor`: the carry flag is cleared, defined.
+    ZeroClearsCf,
+    /// A `neg`: the carry flag is set iff the operand was non-zero, which is
+    /// exactly the recorded result being non-zero.
+    NegResult,
+    Bit,
 }
 
 #[derive(Default)]
@@ -847,6 +856,19 @@ fn lift_insn(
             Expr::Bin(op, Box::new(operand(d, st, 0)), Box::new(operand(d, st, 1))),
         )
     };
+    // AVX arithmetic is three-operand: the destination is written and the two
+    // sources are operands 1 and 2. The legacy form multiplies into operand 0
+    // itself, which `binset` already reads correctly.
+    let vbinset = |st: &Lift, op: &'static str| {
+        if d.op_count() >= 3 {
+            Stmt::Set(
+                dest(d, st),
+                Expr::Bin(op, Box::new(operand(d, st, 1)), Box::new(operand(d, st, 2))),
+            )
+        } else {
+            binset(st, op)
+        }
+    };
     // A few instructions write more than one place. Their extra statements are
     // built here from the state as it stands before the instruction runs, and
     // emitted after the main one, so both read the values the machine read.
@@ -855,7 +877,10 @@ fn lift_insn(
     // update the propagation state from it. Pushes and compares update state
     // directly and emit nothing.
     let stmt: Option<Stmt> = match d.mnemonic() {
-        Nop | Endbr32 | Endbr64 => None,
+        // int3 between functions is alignment padding, not code, and
+        // vzeroupper is an AVX state hint with no effect on any value this
+        // lifter reads. Both drop because that is what they do to the program.
+        Nop | Endbr32 | Endbr64 | Int3 | Vzeroupper => None,
         Mov | Movzx | Movsx | Movsxd => Some(Stmt::Set(dest(d, st), operand(d, st, 1))),
         Lea => {
             // `lea` computes an address expression. Where that expression names
@@ -879,8 +904,60 @@ fn lift_insn(
         And => Some(binset(st, "&")),
         Or => Some(binset(st, "|")),
         Shl | Sal => Some(binset(st, "<<")),
+        // The BMI2 shifts spell the same three shapes with explicit operands;
+        // `sarx` is the arithmetic one, read as the same `>>` the lifter
+        // prints for `sar` and lets the reader's signedness resolve.
+        Shlx => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Bin(
+                "<<",
+                Box::new(operand(d, st, 1)),
+                Box::new(operand(d, st, 2)),
+            ),
+        )),
+        Shrx | Sarx => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Bin(
+                ">>",
+                Box::new(operand(d, st, 1)),
+                Box::new(operand(d, st, 2)),
+            ),
+        )),
         Shr | Sar => Some(binset(st, ">>")),
-        Imul if d.op_count() >= 2 => Some(binset(st, "*")),
+        // The three-operand form `imul dst, src, imm` computes `src * imm`;
+        // the two-operand one multiplies into itself. Reading both through
+        // `binset` turned `imul eax, ecx, 5` into `eax = eax * ecx`, a
+        // different product from a different pair of inputs.
+        Imul if d.op_count() >= 3 => Some(Stmt::Set(
+            dest(d, st),
+            Expr::Bin(
+                "*",
+                Box::new(operand(d, st, 1)),
+                Box::new(operand(d, st, 2)),
+            ),
+        )),
+        Imul if d.op_count() == 2 => Some(binset(st, "*")),
+        // The one-operand widening multiply produces the double-width product
+        // in `high:acc`. The low half is the plain product for either
+        // signedness, and the high half is that product shifted down — the
+        // same width-blind `>>` the sign fill already prints, read as
+        // arithmetic or logical per signedness.
+        Mul | Imul if d.op_count() == 1 => match wide_mul_regs(d) {
+            Some((acc, high, width)) => {
+                let product =
+                    Expr::Bin("*", Box::new(reg_val(st, acc)), Box::new(operand(d, st, 0)));
+                extra.push(Stmt::Set(
+                    reg(high),
+                    Expr::Bin(
+                        ">>",
+                        Box::new(product.clone()),
+                        Box::new(Expr::Const(u64::from(width * 8))),
+                    ),
+                ));
+                Some(Stmt::Set(reg(acc), product))
+            }
+            _ => Some(asm_stmt(d)),
+        },
         Xor => {
             if d.op0_kind() == OpKind::Register
                 && d.op1_kind() == OpKind::Register
@@ -954,35 +1031,119 @@ fn lift_insn(
         // Guarded on an xmm operand because `movsd` is two instructions: the
         // SSE move, and the string move that `rep` drives over memory. Reading
         // a block copy as an assignment would be a bad way to learn that.
+        // AVX keeps the two-operand encoding for packed moves but gives the
+        // scalar moves a third: `vmovsd xmm1, xmm2, xmm3` copies xmm3's low
+        // lane into xmm1, merging xmm2's high half around it. The lane copied
+        // is the value; the merge is invisible at scalar pseudocode width.
+        Vmovsd | Vmovss if d.op_count() == 3 && touches_xmm(d) => {
+            Some(Stmt::Set(dest(d, st), operand(d, st, 2)))
+        }
         m if is_sse_move(m) && d.op_count() == 2 && touches_xmm(d) => {
             Some(Stmt::Set(dest(d, st), operand(d, st, 1)))
         }
-        Addsd | Addss if touches_xmm(d) => Some(binset(st, "+")),
-        Subsd | Subss if touches_xmm(d) => Some(binset(st, "-")),
-        Mulsd | Mulss if touches_xmm(d) => Some(binset(st, "*")),
-        Divsd | Divss if touches_xmm(d) => Some(binset(st, "/")),
-        // `xorps xmm, xmm` is how a compiler writes zero into a float register.
-        Xorps | Xorpd | Pxor
-            if d.op0_kind() == OpKind::Register
-                && d.op1_kind() == OpKind::Register
-                && d.op0_register() == d.op1_register() =>
+        m if matches!(
+            m,
+            Addsd
+                | Addss
+                | Vaddsd
+                | Vaddss
+                | Subsd
+                | Subss
+                | Vsubsd
+                | Vsubss
+                | Mulsd
+                | Mulss
+                | Vmulsd
+                | Vmulss
+                | Divsd
+                | Divss
+                | Vdivsd
+                | Vdivss
+        ) && touches_xmm(d) =>
         {
-            Some(Stmt::Set(dest(d, st), Expr::Const(0)))
+            let op = match d.mnemonic() {
+                Addsd | Addss | Vaddsd | Vaddss => "+",
+                Subsd | Subss | Vsubsd | Vsubss => "-",
+                Mulsd | Mulss | Vmulsd | Vmulss => "*",
+                _ => "/",
+            };
+            Some(vbinset(st, op))
+        }
+        // Bitwise xor, integer or float lanes alike. `xorps xmm, xmm` — and
+        // the VEX `vxorps xmm, xmm, xmm` — is how a compiler writes zero into
+        // a float register; against memory (`xorps xmm0, [g]` over a zero
+        // constant) it is still an xor, which C says directly.
+        m @ (Xorps | Xorpd | Pxor | Vxorps | Vxorpd | Vpxor) => {
+            let (a, b) = if matches!(m, Vxorps | Vxorpd | Vpxor) && d.op_count() >= 3 {
+                (operand(d, st, 1), operand(d, st, 2))
+            } else {
+                (operand(d, st, 0), operand(d, st, 1))
+            };
+            if a == b {
+                Some(Stmt::Set(dest(d, st), Expr::Const(0)))
+            } else if d.op0_kind() == OpKind::Register {
+                Some(Stmt::Set(
+                    dest(d, st),
+                    Expr::Bin("^", Box::new(a), Box::new(b)),
+                ))
+            } else {
+                Some(asm_stmt(d))
+            }
         }
         // The float compare, which a following `ja`/`jbe` reads exactly as the
         // integer one reads `cmp`.
-        Comisd | Comiss | Ucomisd | Ucomiss if touches_xmm(d) => {
+        m if matches!(
+            m,
+            Comisd | Comiss | Ucomisd | Ucomiss | Vcomisd | Vcomiss | Vucomisd | Vucomiss
+        ) && touches_xmm(d) =>
+        {
             st.cmp = Some((operand(d, st, 0), operand(d, st, 1), FlagSrc::Compare));
             None
         }
-        // Conversions are casts, and C has a notation for those.
-        m if cast_of(m).is_some() && d.op_count() == 2 => Some(Stmt::Set(
-            dest(d, st),
-            Expr::Un(
-                cast_of(m).expect("guarded above"),
-                Box::new(operand(d, st, 1)),
-            ),
-        )),
+        // Scalar FMA: one rounding does a multiply and an add. The three
+        // encodings name which operand is the addend; the multiply always
+        // pairs the destination's old value with the remaining source. C has
+        // no fused form, and `a * b + c` is the arithmetic the machine does,
+        // at the precision it does it at.
+        m if fma_of(m).is_some() && d.op_count() == 3 && touches_xmm(d) => {
+            let (add_index, neg_product, neg_sum) = fma_of(m).expect("guarded above");
+            let mul = |i: u32| operand(d, st, i);
+            let (a, b) = match add_index {
+                0 => (mul(1), mul(2)),
+                1 => (mul(0), mul(2)),
+                _ => (mul(0), mul(1)),
+            };
+            let product = Expr::Bin("*", Box::new(a), Box::new(b));
+            let product = if neg_product {
+                Expr::Un("-", Box::new(product))
+            } else {
+                product
+            };
+            let add = mul(add_index);
+            Some(Stmt::Set(
+                dest(d, st),
+                if neg_sum {
+                    Expr::Bin("-", Box::new(product), Box::new(add))
+                } else {
+                    Expr::Bin("+", Box::new(product), Box::new(add))
+                },
+            ))
+        }
+        // Conversions are casts, and C has a notation for those. The AVX forms
+        // carry two sources: the converted value is the last one, as with the
+        // three-operand scalar move.
+        m if cast_of(m).is_some()
+            && (d.op_count() == 2 || (d.op_count() == 3 && touches_xmm(d))) =>
+        {
+            let src = if d.op_count() == 3 { 2 } else { 1 };
+            Some(Stmt::Set(
+                dest(d, st),
+                Expr::Un(
+                    cast_of(m).expect("guarded above"),
+                    Box::new(operand(d, st, src)),
+                ),
+            ))
+        }
         Neg => Some(Stmt::Set(
             dest(d, st),
             Expr::Un("-", Box::new(operand(d, st, 0))),
@@ -999,6 +1160,43 @@ fn lift_insn(
             dest(d, st),
             Expr::Bin("-", Box::new(operand(d, st, 0)), Box::new(Expr::Const(1))),
         )),
+        // `sbb dst, dst` subtracts itself and the borrow: all-ones or zero,
+        // decided by the carry of what ran before it. Where that carry's
+        // meaning is known — the comparison before it, a `neg` (borrow iff the
+        // value was non-zero), a `test`/`and`/`or` (carry cleared) — the value
+        // is exactly C's branchless comparison, which MSVC emits this in place
+        // of. Any other flag history stays assembly rather than guessing a
+        // borrow.
+        Sbb if d.op_count() == 2
+            && d.op0_kind() == OpKind::Register
+            && d.op1_kind() == OpKind::Register
+            && d.op0_register().full_register() == d.op1_register().full_register() =>
+        {
+            let ones = Expr::Const(match d.op0_register().size() {
+                1 => 0xff,
+                2 => 0xffff,
+                4 => 0xffff_ffff,
+                _ => u64::MAX,
+            });
+            let value = match st.cmp.clone() {
+                Some((_, _, FlagSrc::Compare)) => Some(Expr::Ternary(
+                    Box::new(condition(Mnemonic::Jb, &st.cmp)),
+                    Box::new(ones),
+                    Box::new(Expr::Const(0)),
+                )),
+                Some((l, _, FlagSrc::NegResult)) => Some(Expr::Ternary(
+                    Box::new(Expr::Bin("!=", Box::new(l), Box::new(Expr::Const(0)))),
+                    Box::new(ones),
+                    Box::new(Expr::Const(0)),
+                )),
+                Some((_, _, FlagSrc::ZeroClearsCf)) => Some(Expr::Const(0)),
+                Some((_, _, FlagSrc::Zero)) | Some((_, _, FlagSrc::Bit)) | None => None,
+            };
+            match value {
+                Some(v) => Some(Stmt::Set(dest(d, st), v)),
+                None => Some(asm_stmt(d)),
+            }
+        }
         Push => {
             // A `push ebp` in a frame-pointer function is the prologue frame
             // save, not an argument, so it is not collected.
@@ -1030,8 +1228,83 @@ fn lift_insn(
             } else {
                 Expr::Bin("&", Box::new(a), Box::new(b))
             };
-            st.cmp = Some((lhs, Expr::Const(0), FlagSrc::Zero));
+            st.cmp = Some((lhs, Expr::Const(0), FlagSrc::ZeroClearsCf));
             None
+        }
+        // `bt` reads one bit into the carry flag, and the branch after it asks
+        // about exactly that bit. `bts`/`btr` set or clear the bit first, and
+        // the flag still reflects the bit as it was — which is what the
+        // recorded comparison keeps, on the value read before the write.
+        m @ (Bt | Bts | Btr) if d.op_count() == 2 => {
+            let val = operand(d, st, 0);
+            let idx = operand(d, st, 1);
+            let bit = Expr::Bin(
+                "&",
+                Box::new(Expr::Bin(
+                    ">>",
+                    Box::new(val.clone()),
+                    Box::new(idx.clone()),
+                )),
+                Box::new(Expr::Const(1)),
+            );
+            st.cmp = Some((bit, Expr::Const(1), FlagSrc::Bit));
+            match m {
+                Bt => None,
+                Bts => Some(Stmt::Set(
+                    dest(d, st),
+                    Expr::Bin(
+                        "|",
+                        Box::new(val),
+                        Box::new(Expr::Bin("<<", Box::new(Expr::Const(1)), Box::new(idx))),
+                    ),
+                )),
+                _ => Some(Stmt::Set(
+                    dest(d, st),
+                    Expr::Bin(
+                        "&",
+                        Box::new(val),
+                        Box::new(Expr::Un(
+                            "~",
+                            Box::new(Expr::Bin("<<", Box::new(Expr::Const(1)), Box::new(idx))),
+                        )),
+                    ),
+                )),
+            }
+        }
+        // A rotate has no C operator. With an immediate count the exact
+        // expansion is small and pure: `(x >> n) | (x << (width - n))`. A
+        // register count is masked by the hardware, which C's shifts are not,
+        // so it stays assembly instead of printing a shift C might refuse.
+        m @ (Rol | Ror)
+            if d.op_count() == 2 && d.op0_kind() == OpKind::Register && is_imm(d, 1) =>
+        {
+            let width = d.op0_register().size() as u64 * 8;
+            let n = d.immediate(1);
+            if n == 0 || n >= width {
+                Some(asm_stmt(d))
+            } else {
+                let x = operand(d, st, 0);
+                let (first_op, first_n, second_op, second_n) = match m {
+                    Ror => (">>", n, "<<", width - n),
+                    _ => ("<<", n, ">>", width - n),
+                };
+                Some(Stmt::Set(
+                    dest(d, st),
+                    Expr::Bin(
+                        "|",
+                        Box::new(Expr::Bin(
+                            first_op,
+                            Box::new(x.clone()),
+                            Box::new(Expr::Const(first_n)),
+                        )),
+                        Box::new(Expr::Bin(
+                            second_op,
+                            Box::new(x),
+                            Box::new(Expr::Const(second_n)),
+                        )),
+                    ),
+                ))
+            }
         }
         Call => {
             let call = lift_call(d, st, an, bin, win64, target_name, db);
@@ -1042,11 +1315,17 @@ fn lift_insn(
             };
             Some(Stmt::Set(reg(ret), call))
         }
-        Ret => Some(Stmt::Ret(Some(reg(if an.bits == 32 {
-            Register::EAX
-        } else {
-            Register::RAX
-        })))),
+        // The return reads the register the way any other read does: whatever
+        // value propagation recovered is printed, and with none the register
+        // names itself.
+        Ret => Some(Stmt::Ret(Some(reg_val(
+            st,
+            if an.bits == 32 {
+                Register::EAX
+            } else {
+                Register::RAX
+            },
+        )))),
         Jmp => Some(match branch_target(d) {
             Some(t) => Stmt::Goto(t),
             // An indexed memory jump is a switch; its selector is the index. The
@@ -1097,7 +1376,18 @@ fn lift_insn(
     let m = d.mnemonic();
     if sets_zero_flags(m) {
         if let Some(Stmt::Set(dst, _)) = &stmt {
-            st.cmp = Some((dst.clone(), Expr::Const(0), FlagSrc::Zero));
+            // `and`/`or`/`xor` clear the carry flag, defined, and `neg` sets it
+            // to the operand's non-zero-ness; `sbb` reads exactly that carry,
+            // so the recorded comparison keeps which one set it. The rest
+            // leave a carry this lifter does not reconstruct.
+            let src = if m == Mnemonic::Neg {
+                FlagSrc::NegResult
+            } else if matches!(m, Mnemonic::And | Mnemonic::Or | Mnemonic::Xor) {
+                FlagSrc::ZeroClearsCf
+            } else {
+                FlagSrc::Zero
+            };
+            st.cmp = Some((dst.clone(), Expr::Const(0), src));
         }
     } else if !is_comparison(m) && !preserves_flags(m) {
         st.cmp = None;
@@ -1167,12 +1457,26 @@ fn lift_insn(
 }
 
 /// The instructions that leave a comparison behind for a later branch to read.
-/// The float compares belong here with `cmp` and `test`: they are how a
-/// comparison is made, so treating them as flag clobber would throw away the
-/// comparison they had just recorded.
+/// The float compares belong here with `cmp` and `test`, as do the bit tests:
+/// they are how a comparison is made, so treating them as flag clobbers would
+/// throw away the comparison they had just recorded.
 fn is_comparison(m: Mnemonic) -> bool {
     use Mnemonic::*;
-    matches!(m, Cmp | Test | Comisd | Comiss | Ucomisd | Ucomiss)
+    matches!(
+        m,
+        Cmp | Test
+            | Bt
+            | Bts
+            | Btr
+            | Comisd
+            | Comiss
+            | Ucomisd
+            | Ucomiss
+            | Vcomisd
+            | Vcomiss
+            | Vucomisd
+            | Vucomiss
+    )
 }
 
 /// Whether any operand is a vector register, which is what separates the SSE
@@ -1188,12 +1492,32 @@ fn touches_xmm(d: &Instruction) -> bool {
 
 /// The vector moves that are plain copies. The packed ones are here too: a
 /// 128-bit spill and reload is still a copy of whatever it held, and saying so
-/// claims nothing about the lanes inside it.
+/// claims nothing about the lanes inside it. AVX spells the same moves with a
+/// leading `v`.
 fn is_sse_move(m: Mnemonic) -> bool {
     use Mnemonic::*;
     matches!(
         m,
-        Movsd | Movss | Movaps | Movups | Movapd | Movupd | Movdqa | Movdqu | Movd | Movq
+        Movsd
+            | Movss
+            | Movaps
+            | Movups
+            | Movapd
+            | Movupd
+            | Movdqa
+            | Movdqu
+            | Movd
+            | Movq
+            | Vmovsd
+            | Vmovss
+            | Vmovaps
+            | Vmovups
+            | Vmovapd
+            | Vmovupd
+            | Vmovdqa
+            | Vmovdqu
+            | Vmovd
+            | Vmovq
     )
 }
 
@@ -1204,6 +1528,33 @@ fn cast_of(m: Mnemonic) -> Option<&'static str> {
         Cvtsi2sd | Cvtss2sd => "(double)",
         Cvtsi2ss | Cvtsd2ss => "(float)",
         Cvttsd2si | Cvttss2si | Cvtsd2si | Cvtss2si => "(int)",
+        // the AVX spellings of the same conversions
+        Vcvtsi2sd | Vcvtss2sd => "(double)",
+        Vcvtsi2ss | Vcvtsd2ss => "(float)",
+        Vcvttsd2si | Vcvttss2si | Vcvtsd2si | Vcvtss2si => "(int)",
+        _ => return None,
+    })
+}
+
+/// The scalar FMA instructions. Returns which of the three operands is the
+/// additive term (0 = the destination's old value), and the signs the product
+/// and the sum carry. Multiplication commutes, so which of the remaining two
+/// multiplies first does not matter; which one is added does.
+fn fma_of(m: Mnemonic) -> Option<(u32, bool, bool)> {
+    use Mnemonic::*;
+    Some(match m {
+        Vfmadd132sd | Vfmadd132ss => (1, false, false),
+        Vfmadd213sd | Vfmadd213ss => (2, false, false),
+        Vfmadd231sd | Vfmadd231ss => (0, false, false),
+        Vfmsub132sd | Vfmsub132ss => (1, false, true),
+        Vfmsub213sd | Vfmsub213ss => (2, false, true),
+        Vfmsub231sd | Vfmsub231ss => (0, false, true),
+        Vfnmadd132sd | Vfnmadd132ss => (1, true, false),
+        Vfnmadd213sd | Vfnmadd213ss => (2, true, false),
+        Vfnmadd231sd | Vfnmadd231ss => (0, true, false),
+        Vfnmsub132sd | Vfnmsub132ss => (1, true, true),
+        Vfnmsub213sd | Vfnmsub213ss => (2, true, true),
+        Vfnmsub231sd | Vfnmsub231ss => (0, true, true),
         _ => return None,
     })
 }
@@ -1212,6 +1563,23 @@ fn cast_of(m: Mnemonic) -> Option<&'static str> {
 /// width of its divisor. The 8-bit form divides `ax` on its own and does not
 /// fit this shape, so it is left unmodelled.
 fn divide_regs(d: &Instruction) -> Option<(Register, Register, u32)> {
+    let bytes = match d.op0_kind() {
+        OpKind::Register => d.op0_register().size(),
+        OpKind::Memory => d.memory_size().size(),
+        _ => return None,
+    };
+    match bytes {
+        2 => Some((Register::AX, Register::DX, 2)),
+        4 => Some((Register::EAX, Register::EDX, 4)),
+        8 => Some((Register::RAX, Register::RDX, 8)),
+        _ => None,
+    }
+}
+
+/// The accumulator and high-half registers a one-operand `mul`/`imul` writes,
+/// taken from the width of its operand. The 8-bit forms leave the product's
+/// low half in `ax` alone and do not fit this shape, so they stay unmodelled.
+fn wide_mul_regs(d: &Instruction) -> Option<(Register, Register, u32)> {
     let bytes = match d.op0_kind() {
         OpKind::Register => d.op0_register().size(),
         OpKind::Memory => d.memory_size().size(),
@@ -4024,7 +4392,12 @@ fn preserves_flags(m: Mnemonic) -> bool {
         || matches!(
             m,
             Addsd | Addss | Subsd | Subss | Mulsd | Mulss | Divsd | Divss | Xorps | Xorpd | Pxor
-        ) || cast_of(m).is_some() || format!("{m:?}").starts_with('J')
+            // their AVX twins, plus the state hint and the padding trap
+            | Vaddsd | Vaddss | Vsubsd | Vsubss | Vmulsd | Vmulss | Vdivsd | Vdivss
+            | Vxorps | Vxorpd | Vpxor | Vzeroupper | Int3
+        )
+        || fma_of(m).is_some()
+        || cast_of(m).is_some() || format!("{m:?}").starts_with('J')
         // setcc/cmov read the flags but do not change them, so a compare survives
         // for a following conditional that shares it.
         || is_setcc(m)
@@ -4054,7 +4427,9 @@ fn condition(m: Mnemonic, cmp: &Option<(Expr, Expr, FlagSrc)>) -> Expr {
         // A result compared against zero. The unsigned conditions (`ja`/`jb`
         // and friends) are carry-based and not expressible as "result vs 0", so
         // they fall back to the raw condition rather than a wrong comparison.
-        FlagSrc::Zero => {
+        // The zero-source variants that additionally pin the carry flag read
+        // the zero-testable conditions identically; only `sbb` tells them apart.
+        FlagSrc::Zero | FlagSrc::ZeroClearsCf | FlagSrc::NegResult => {
             let op = match m {
                 Mnemonic::Je => "==",
                 Mnemonic::Jne => "!=",
@@ -4065,6 +4440,17 @@ fn condition(m: Mnemonic, cmp: &Option<(Expr, Expr, FlagSrc)>) -> Expr {
                 _ => return Expr::Opaque(format!("{m:?}").to_lowercase()),
             };
             bin(op, l, Expr::Const(0))
+        }
+        // The carry flag holds the one tested bit: `jc` asks whether it is
+        // set, `jnc` whether it is clear. Nothing else about these flags is
+        // defined, so any other condition stays raw rather than a guess.
+        FlagSrc::Bit => {
+            let op = match m {
+                Mnemonic::Jb => "==",
+                Mnemonic::Jae => "!=",
+                _ => return Expr::Opaque(format!("{m:?}").to_lowercase()),
+            };
+            bin(op, l, Expr::Const(1))
         }
     }
 }
@@ -4820,6 +5206,302 @@ mod tests {
     }
 
     #[test]
+    fn the_three_operand_imul_multiplies_its_sources() {
+        // mov eax, 9 ; imul eax, ecx, 5 ; mov ebx, eax ; ret
+        //
+        // `imul eax, ecx, 5` computes `ecx * 5` into eax. Read through the
+        // two-operand shape, it printed `eax = eax * ecx` — a different
+        // product, silently.
+        let code = vec![
+            0xb8, 0x09, 0x00, 0x00, 0x00, // mov eax, 9
+            0x6b, 0xc1, 0x05, // imul eax, ecx, 5
+            0x8b, 0xd8, // mov ebx, eax
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains("ecx * 0x5"),
+            "the sources are operand 1 and the immediate:
+{text}"
+        );
+        assert!(
+            !text.contains("eax *"),
+            "the old destination is not a factor of the three-operand form:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_one_operand_mul_states_both_halves() {
+        // mov rax, rcx ; mul rdx ; mov rdi, rax ; mov rsi, rdx ; ret
+        //
+        // The widening multiply's two results are both values the program can
+        // read; the high half is the product shifted down, the same width-blind
+        // `>>` the sign fill prints.
+        let text = joined_x64(vec![
+            0x48, 0x89, 0xc8, // mov rax, rcx
+            0x48, 0xf7, 0xe2, // mul rdx
+            0x48, 0x89, 0xc7, // mov rdi, rax
+            0x48, 0x89, 0xd6, // mov rsi, rdx
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains(">> 0x40"),
+            "the high half is the product shifted down by the width:
+{text}"
+        );
+        assert!(
+            text.contains("rcx * rdx"),
+            "the product is the multiply of its sources:
+{text}"
+        );
+    }
+
+    #[test]
+    fn bt_then_jc_reads_the_tested_bit() {
+        // bt eax, 3 ; jc +1 ; ret ; ret
+        //
+        // `bt` reads one bit into the carry flag, and the branch after it asks
+        // about exactly that bit. A raw `jb` on an unrecovered comparison
+        // would say less than the machine does.
+        let code = vec![
+            0x0f, 0xba, 0xe0, 0x03, // bt eax, 3
+            0x72, 0x01, // jc +1
+            0xc3, // ret
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains(">> 0x3") && text.contains("== 0x1"),
+            "the branch should read the bit:
+{text}"
+        );
+        assert!(
+            !text.contains("/*"),
+            "bt must not stay verbatim:
+{text}"
+        );
+    }
+
+    #[test]
+    fn bts_sets_the_bit_it_reported() {
+        // mov eax, [rcx] ; bts eax, 7 ; mov edx, eax ; ret
+        let text = joined_x64(vec![
+            0x8b, 0x01, // mov eax, [rcx]
+            0x0f, 0xba, 0xe8, 0x07, // bts eax, 7
+            0x8b, 0xd0, // mov edx, eax
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("0x80") && text.contains("|"),
+            "bts sets the bit:
+{text}"
+        );
+    }
+
+    #[test]
+    fn btr_clears_the_bit_it_reported() {
+        // btr ebx, 0x1f ; mov eax, ebx ; ret
+        let text = joined_x64(vec![
+            0x0f, 0xba, 0xf3, 0x1f, // btr ebx, 0x1f
+            0x8b, 0xc3, // mov eax, ebx
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("~0x80000000") && text.contains("&"),
+            "btr clears the bit:
+{text}"
+        );
+    }
+
+    #[test]
+    fn sbb_after_cmp_is_the_borrow() {
+        // cmp edx, ecx ; sbb ebx, ebx ; mov eax, ebx ; ret
+        //
+        // MSVC's branchless `-(a < b)`: the carry of the comparison decides
+        // between all-ones and zero.
+        let code = vec![
+            0x3b, 0xd1, // cmp edx, ecx
+            0x19, 0xdb, // sbb ebx, ebx
+            0x8b, 0xc3, // mov eax, ebx
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            text.contains("edx < ecx") && text.contains("? 0xffffffff : 0x0"),
+            "the borrow should read as the comparison:
+{text}"
+        );
+    }
+
+    #[test]
+    fn sbb_after_test_is_zero() {
+        // test eax, eax ; sbb ecx, ecx ; mov eax, ecx ; ret
+        //
+        // `test` clears the carry flag, defined, so the subtract-with-borrow
+        // of itself leaves exactly zero.
+        let text = joined_x64(vec![
+            0x85, 0xc0, // test eax, eax
+            0x19, 0xc9, // sbb ecx, ecx
+            0x8b, 0xc1, // mov eax, ecx
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("return 0x0"),
+            "a cleared carry borrows nothing:
+{text}"
+        );
+    }
+
+    #[test]
+    fn sbb_after_neg_borrows_on_non_zero() {
+        // sub eax, ebx ; neg eax ; sbb cl, cl ; movzx eax, cl ; ret
+        //
+        // The real pattern behind most of ucrtbase's remaining `sbb`: `neg`
+        // sets the carry to the operand's non-zero-ness, so the borrow reads
+        // as `result != 0`.
+        let text = joined_x64(vec![
+            0x2b, 0xc3, // sub eax, ebx
+            0xf7, 0xd8, // neg eax
+            0x18, 0xc9, // sbb cl, cl
+            0x0f, 0xb6, 0xc1, // movzx eax, cl
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("!= 0x0") && text.contains("? 0xff : 0x0"),
+            "a neg's carry is the value being non-zero:
+{text}"
+        );
+    }
+
+    #[test]
+    fn avx_moves_are_copies() {
+        // vmovaps xmm0, xmm1 ; vmovups [rcx], xmm0 ; ret
+        let text = joined_x64(vec![
+            0xc5, 0xf8, 0x28, 0xc1, // vmovaps xmm0, xmm1
+            0xc5, 0xf8, 0x11, 0x01, // vmovups [rcx], xmm0
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("*(rcx) = xmm1") && !text.contains("/*"),
+            "the AVX move is the copy its legacy twin is:
+{text}"
+        );
+    }
+
+    #[test]
+    fn avx_scalar_arithmetic_reads_as_arithmetic() {
+        // vaddsd xmm0, xmm1, xmm2 ; vmovsd [rcx], xmm0 ; ret
+        let text = joined_x64(vec![
+            0xc5, 0xf3, 0x58, 0xc2, // vaddsd xmm0, xmm1, xmm2
+            0xc5, 0xfb, 0x11, 0x01, // vmovsd [rcx], xmm0
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("xmm1 + xmm2") && !text.contains("/*"),
+            "the VEX form is three-operand:
+{text}"
+        );
+    }
+
+    #[test]
+    fn avx_zeroing_xor_is_zero() {
+        // vxorps xmm0, xmm0, xmm0 ; vmovups [rcx], xmm0 ; ret
+        let text = joined_x64(vec![
+            0xc5, 0xf8, 0x57, 0xc0, // vxorps xmm0, xmm0, xmm0
+            0xc5, 0xf8, 0x11, 0x01, // vmovups [rcx], xmm0
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("*(rcx) = 0x0") && !text.contains("/*"),
+            "zeroing is how compilers write 0.0:
+{text}"
+        );
+    }
+
+    #[test]
+    fn the_fused_multiply_add_reads_as_its_arithmetic() {
+        // vfmadd213sd xmm0, xmm3, xmm4 ; vmovsd [rcx], xmm0 ; ret
+        //
+        // 213 pairs the destination's old value with xmm3 and adds xmm4.
+        let text = joined_x64(vec![
+            0xc4, 0xe2, 0xe5, 0xa9, 0xc4, // vfmadd213sd xmm0, xmm3, xmm4
+            0xc5, 0xfb, 0x11, 0x01, // vmovsd [rcx], xmm0
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("xmm0 * xmm3 + xmm4") && !text.contains("/*"),
+            "one rounding does a multiply and an add:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_vex_scalar_move_takes_the_copied_lane() {
+        // vmovsd xmm1, xmm2, xmm3 ; vmovsd [rcx], xmm1 ; ret
+        //
+        // The third operand is the lane being copied; the middle one only
+        // merges the high half that scalar pseudocode does not see.
+        let text = joined_x64(vec![
+            0xc5, 0xeb, 0x10, 0xcb, // vmovsd xmm1, xmm2, xmm3
+            0xc5, 0xfb, 0x11, 0x09, // vmovsd [rcx], xmm1
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("*(rcx) = xmm3") && !text.contains("/*"),
+            "the copied lane is the value:
+{text}"
+        );
+    }
+
+    #[test]
+    fn bmi2_shifts_read_as_shifts() {
+        // shlx edx, ecx, eax ; mov eax, edx ; ret
+        let text = joined_x64(vec![
+            0xc4, 0xe2, 0x79, 0xf7, 0xd1, // shlx edx, ecx, eax
+            0x8b, 0xc2, // mov eax, edx
+            0xc3, // ret
+        ]);
+        assert!(
+            text.contains("ecx << eax") && !text.contains("/*"),
+            "the BMI2 shift is the shift its legacy twin is:
+{text}"
+        );
+    }
+
+    #[test]
+    fn an_immediate_rotate_expands_to_its_shifts() {
+        // rol eax, 0x10 ; ret
+        let code = vec![0xc1, 0xc0, 0x10, 0xc3];
+        let text = joined_x64(code);
+        assert!(
+            text.contains("<< 0x10") && text.contains(">> 0x10") && !text.contains("/*"),
+            "a rotate by a constant is exactly two shifts:
+{text}"
+        );
+    }
+
+    #[test]
+    fn padding_traps_and_state_hints_are_dropped() {
+        // mov eax, ecx ; int3 ; vzeroupper ; ret
+        //
+        // int3 here is alignment padding between functions and vzeroupper is
+        // an AVX state hint; neither has an effect the pseudocode could show.
+        let code = vec![
+            0x8b, 0xc1, // mov eax, ecx
+            0xcc, // int3
+            0xc5, 0xf8, 0x77, // vzeroupper
+            0xc3, // ret
+        ];
+        let text = joined_x64(code);
+        assert!(
+            !text.contains("int3") && !text.contains("vzeroupper"),
+            "neither does anything the pseudocode could say:
+{text}"
+        );
+    }
+
+    #[test]
     fn negation_and_complement_read_as_operators() {
         // mov eax, ecx ; neg eax ; ret   →  -ecx
         let text = joined_x64(vec![0x8b, 0xc1, 0xf7, 0xd8, 0xc3]);
@@ -5255,7 +5937,7 @@ mod tests {
             "dereference use should constrain the ABI parameter: {joined}"
         );
         assert!(
-            joined.contains("eax = rcx->field_8;"),
+            joined.contains("return rcx->field_8;"),
             "constant member displacement should become a stable field: {joined}"
         );
     }
@@ -5314,7 +5996,12 @@ mod tests {
         // label its 32-bit use instead of mixing `context` and `ecx`.
         let lines = lines_x64_raw_with_db(vec![0x8b, 0xc1, 0xc3], &db);
         assert_eq!(lines[0].text, "bool entry(CONTEXT * context) {");
-        assert!(lines.iter().any(|line| line.text.contains("eax = context")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.text.contains("return context")),
+            "the alias should label the returned value: {lines:?}"
+        );
     }
 
     #[test]
@@ -5403,7 +6090,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("eax = arg_8;") && joined.contains("var_8 = edx;"),
+            joined.contains("return arg_8;") && joined.contains("var_8 = edx;"),
             "rsp-relative locals should be named, got:\n{joined}"
         );
         for gone in ["rax = rsp", "= rbx", "rsp -", "*(rsp"] {
@@ -5667,7 +6354,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("g_9000 = 0x2a;") && joined.contains("eax = g_9000;"),
+            joined.contains("g_9000 = 0x2a;") && joined.contains("return g_9000;"),
             "a fixed address should read as g_9000, got:\n{joined}"
         );
         assert!(

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- Removed YARA. The `yara` subcommand, `info --rules`, and the yara-x
+  dependency are gone. Rule matching was a second opinion bolted onto triage
+  rather than something the tool could reason about; capability detection,
+  the constant scanner, and the transparent verdict score carry the triage
+  story on their own, and the build drops its one heavyweight dependency.
+- The pseudocode reads the arithmetic UCRT and MSVC actually emit. On
+  ucrtbase.dll the share of instructions left as verbatim assembly fell from
+  2.86% to 0.62% (7,079 to 1,527 of 247,363), and the functions containing any
+  fell from 1,088 to 520:
+  - AVX is read like its legacy twins. ucrtbase is built with VEX encodings,
+    and every `v`-prefixed instruction was a comment: the moves (including the
+    three-operand `vmovsd xmm1, xmm2, xmm3`, which copies its last source),
+    the scalar arithmetic and compares, the zeroing xors, and the scalar FMA
+    family, which now reads as the `a * b + c` one rounding computes.
+  - `sbb reg, reg` — MSVC's branchless comparison — reads as the borrow it
+    is: `(a < b) ? -1 : 0` after a `cmp`, `value != 0 ? -1 : 0` after a
+    `neg`, and plain zero after a `test`/`and`/`or`, whose cleared carry is
+    defined. A borrow this lifter cannot trace stays assembly.
+  - `bt`/`bts`/`btr` read the bit they test into the branch that follows:
+    `bts eax, 7` is `eax = eax | (1 << 7)` and the `jc` after a `bt` asks
+    whether `((value >> 7) & 1) == 1`.
+  - The one-operand widening multiply states both halves; the three-operand
+    `imul dst, src, imm` no longer multiplies into the old destination
+    (it printed `eax = eax * ecx` for `imul eax, ecx, 5`, a different
+    product); BMI2 `shlx`/`shrx`/`sarx` read as shifts; a rotate by an
+    immediate expands to its exact two shifts; the AVX conversions read as
+    the casts they are; and `int3` padding and `vzeroupper` are dropped.
+- A `ret` prints the value propagation recovered — `return 0x0`, not
+  `eax = 0x0; return rax` — and the redundant assignment goes with it.
+
 ## v1.7.0
 
 - PE symbols come from the PDB when there is one. knife read no debug

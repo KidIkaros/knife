@@ -148,7 +148,7 @@ pub struct BinarySummary {
 }
 
 impl BinarySummary {
-    pub fn from_session(session: &Session, yara_names: &[String]) -> Self {
+    pub fn from_session(session: &Session) -> Self {
         let file_hashes = hashes::file_hashes(&session.bytes);
         let hardening = hardening::run(&session.bin);
         let capability_matches = capabilities::matches(
@@ -157,7 +157,7 @@ impl BinarySummary {
                 .all_imported_functions()
                 .chain(session.bin.exports.iter().map(String::as_str)),
         );
-        let triage = triage::run(&session.bin, &capability_matches, yara_names);
+        let triage = triage::run(&session.bin, &capability_matches);
         let signing = signing::summarize(&session.bin, &session.bytes);
 
         let mut by_category: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();

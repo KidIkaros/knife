@@ -143,7 +143,6 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife hashes FILE` | MD5 / SHA-1 / SHA-256 and imphash |
 | `knife drv FILE [--reachable]` | kernel-driver / BYOVD analysis: identity, devices, IRP dispatch, IOCTLs, kernel primitives, signing, loldrivers matches |
 | `knife scan FILE` | crypto constants, packer markers, embedded formats |
-| `knife yara RULES FILE` | match YARA rules (RULES is a file or a directory) |
 | `knife map FILE` | whole-file entropy sparkline, packed regions flagged |
 | `knife hex FILE --off O --len L` | hex dump |
 | `knife ls FILE` | archive (.a/.lib) members |
@@ -151,8 +150,7 @@ One tool, many jobs, which is the point of a Swiss-army knife:
 | `knife diff A B` | compare two binaries' functions, imports, sections; exit 1 on any change |
 
 Add `--json` to any analysis command for machine-readable output. `knife FILE`
-is shorthand for `knife info FILE`, and `knife FILE --rules DIR` folds a YARA
-pass into the verdict.
+is shorthand for `knife info FILE`.
 
 ## For vulnerability research
 
@@ -301,10 +299,9 @@ severity, `/` filters. The kernel API catalogue feeds `knife sinks` and
   knife dis sample.exe --func verify        # analyzes staged bytes
   knife patch sample.exe --export sample-patched.exe
   ```
-- **Constant scanning & YARA built in.** `knife scan` fingerprints AES S-boxes
+- **Constant scanning built in.** `knife scan` fingerprints AES S-boxes
   (generated, not stored), SHA/MD5/CRC32 constants, packer markers, and
-  embedded formats. `knife yara` runs [yara-x](https://github.com/VirusTotal/yara-x),
-  VirusTotal's pure-Rust engine — no libyara C dependency.
+  embedded formats.
 - **Transparent triage.** The verdict (`CLEAN` / `LOW RISK` / `SUSPICIOUS` /
   `MALICIOUS`) is an additive score where every point is a named signal.
   Concealment and anomaly weigh above raw capability — a system DLL
@@ -314,9 +311,6 @@ severity, `/` filters. The kernel API catalogue feeds `knife sinks` and
 ## Examples
 
 ```bash
-# triage a sample and fold a rule directory into the verdict
-knife sample.exe --rules ~/rules/
-
 # busiest functions, then read the hot one
 knife funcs sample.exe --by-refs
 knife dis sample.exe --func sub_401240
@@ -336,8 +330,7 @@ cargo test
 ```
 
 Needs Rust 1.88 or newer (2021 edition). No system libraries beyond the
-platform default; the YARA engine and the terminal interface are both pure
-Rust.
+platform default; the whole tool, terminal interface included, is pure Rust.
 
 ## Community
 

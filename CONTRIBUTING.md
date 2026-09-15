@@ -23,11 +23,10 @@ src/main.rs        CLI and terminal rendering
 src/model.rs       the format-neutral Binary model
 src/formats/       PE / ELF / Mach-O parsing (via goblin)
 src/analysis/      entropy, hashes, strings/IOCs, capabilities, signatures,
-                   yara, the CFG engine, disasm, and triage scoring
+                   the CFG engine, disasm, and triage scoring
 ```
 
 ## Scope
 
 knife is a static analyzer: it must never execute the file under analysis. Keep
-new features offline and dependency-light. The YARA engine (yara-x) is the one
-large dependency, chosen because it is pure Rust and needs no C toolchain.
+new features offline and dependency-light.

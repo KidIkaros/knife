@@ -20,7 +20,6 @@ pub mod patches;
 pub mod persistence;
 pub mod references;
 pub mod risk_signals;
-pub mod rules;
 pub mod symbols;
 pub mod workspace;
 

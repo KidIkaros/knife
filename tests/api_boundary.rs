@@ -372,7 +372,7 @@ fn binary_summary_preserves_container_address_kinds_and_existing_detail_facts() 
         "binary summary boundary test",
     )
     .unwrap();
-    let summary = BinarySummary::from_session(&session, &[]);
+    let summary = BinarySummary::from_session(&session);
 
     assert_eq!(summary.path, session.bin.path);
     assert_eq!(summary.image_base, StaticVa(session.bin.image_base));

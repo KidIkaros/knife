@@ -469,7 +469,7 @@ fn triage_tool(sess: &Session) -> Value {
             .all_imported_functions()
             .chain(sess.bin.exports.iter().map(String::as_str)),
     );
-    let verdict = triage::run(&sess.bin, &caps, &[]);
+    let verdict = triage::run(&sess.bin, &caps);
     serde_json::to_value(verdict).unwrap_or(Value::Null)
 }
 
