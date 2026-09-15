@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.0
 
 - Removed YARA. The `yara` subcommand, `info --rules`, and the yara-x
   dependency are gone. Rule matching was a second opinion bolted onto triage
@@ -31,6 +31,33 @@
     the casts they are; and `int3` padding and `vzeroupper` are dropped.
 - A `ret` prints the value propagation recovered — `return 0x0`, not
   `eax = 0x0; return rax` — and the redundant assignment goes with it.
+- `knife` with no argument opens a file explorer instead of printing usage.
+  Directories sort first, PE/ELF/Mach-O/archive files carry a badge sniffed
+  from their magic bytes, `/` filters by name, and Enter hands the file to
+  the analysis workspace. Quitting the workspace returns to the explorer in
+  the same directory, so a folder of samples is one keypress per file.
+  `knife tui` without a file and `knife <directory>` do the same.
+- Split comparison in the TUI. `:split` clones the active listing into a
+  second column and `:compare FUNC` pins a function (or a data view) there,
+  so two functions sit side by side while the active pane keeps roaming.
+  Tab walks between the columns; each keeps its own cursor, view mode,
+  in-listing search and back/forward history. The references pane hides
+  while split; `:only` (or `:close` on the listing) collapses back to one.
+- `:reload` re-reads the target from disk and re-analyses it on a background
+  worker, so a rebuilt or unpacked sample lands without restarting the
+  session. Pane layout, filters and bookmarks survive; navigation into the
+  old image does not. Annotations follow content identity: an unchanged file
+  reloads into the same database, a changed file starts a fresh one, and a
+  failed reload keeps the old session untouched.
+- `:goto` accepts explicit address modes: `off:0xOFFSET` (alias `file:`)
+  converts a file offset through the section table, and `va:0xADDRESS` pins
+  a value to the static-VA space even when a symbol shares the text. Miss
+  errors show the address as typed instead of adding the image base twice.
+- A target with no recovered functions no longer refuses to open: the
+  workspace starts on the first mapped bytes and the section, string and
+  import catalogs stay available.
+- Terminals below 24x6 show a resize notice instead of clipped fragments,
+  and the README is half its former length.
 
 ## v1.7.0
 
