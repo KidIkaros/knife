@@ -62,6 +62,10 @@ Or grab a prebuilt archive from the
 [Releases](https://github.com/bl4ckr0ss3/knife/releases) page and drop `knife`
 on your `PATH`.
 
+If your shell cannot find `knife` after installing, `~/.cargo/bin` is not on
+your `PATH` yet: restart the shell (or `source ~/.cargo/env` on Unix), then
+`knife --version`.
+
 ## The TUI
 
 `knife tui FILE` opens a monochrome debugger-style workspace: function list,
