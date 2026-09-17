@@ -799,7 +799,11 @@ fn origin_of(d: &Instruction, bin: &Binary, an: &Analysis, bytes: &[u8]) -> Orig
         Mnemonic::Sub | Mnemonic::Sbb => Origin::Subtract,
         // `lea reg, [base + index*scale]` with a real index is a multiply; a
         // frame-relative lea is a stack buffer; a plain `lea reg, [rip+k]` is a
-        // fixed address.
+        // fixed address. A GPR-relative lea with a displacement is address
+        // arithmetic on a runtime value — when it feeds a size argument it is
+        // subtraction with a different encoding (`lea edx, [rax-0x10]` is
+        // `sub`-then-move fused by the optimizer), so classify it as Subtract
+        // and let the operand chase decide whether it is attacker-influenced.
         Mnemonic::Lea => {
             let base = d.memory_base();
             if matches!(
@@ -808,9 +812,16 @@ fn origin_of(d: &Instruction, bin: &Binary, an: &Analysis, bytes: &[u8]) -> Orig
             ) && d.memory_index() == Register::None
             {
                 Origin::Stack
+            } else if d.memory_base() == Register::RIP {
+                Origin::Fixed
             } else if d.memory_index() != Register::None {
                 Origin::Multiply
+            } else if d.memory_displacement64() != 0 {
+                // GPR or bare base + displacement: runtime address arithmetic.
+                Origin::Subtract
             } else {
+                // Base-only lea with no displacement (`lea edx, [rax]`):
+                // a plain register copy of an address.
                 Origin::Fixed
             }
         }
